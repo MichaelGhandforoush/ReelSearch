@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ReelSearch stopped</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="{{ url_for('static', filename='theme.js') }}"></script>
+</head>
+<body>
+    <main class="container">
+        <section class="panel">
+            <p class="eyebrow">Stopped</p>
+            <h1>ReelSearch has exited.</h1>
+            {% if paused or forced %}
+                <p class="section-note">
+                    {% if paused %}{{ paused }} sync{{ 's' if paused != 1 }} paused cleanly.{% endif %}
+                    {% if forced %}{{ forced }} sync{{ 's' if forced != 1 }} stopped mid-video; that video will load again on the next sync.{% endif %}
+                </p>
+            {% endif %}
+            <p class="section-note">You can close this tab. Run <code>python app.py</code> to start it again.</p>
+        </section>
+    </main>
+</body>
+</html>

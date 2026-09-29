@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connect {{ platform }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="{{ url_for('static', filename='theme.js') }}"></script>
+</head>
+<body>
+    <main class="container login-page">
+        <div class="page-bar">
+            <a class="back-link" href="{{ url_for('accounts_route') }}">← Back to accounts</a>
+            <button class="theme-toggle" type="button" data-theme-toggle aria-label="Toggle dark mode"><span aria-hidden="true">◐</span></button>
+        </div>
+        <section class="panel">
+            <div class="login-heading">
+                <div class="platform-icon platform-{{ platform|lower }}" aria-hidden="true">{{ platform_abbreviation }}</div>
+                <div>
+                    <p class="eyebrow">New connection</p>
+                    <h1>Connect {{ platform }}</h1>
+                </div>
+            </div>
+            <p class="page-intro">Enter your {{ platform }} username. A browser window will open so you can log in; ReelSearch never stores your password.</p>
+            {% if error %}<div class="inline-error" role="alert">{{ error }}</div>{% endif %}
+            <form
+                action="{{ url_for('login_platform_route', platform=platform.lower()) }}"
+                method="POST"
+                class="search-form login-form"
+            >
+                <label class="sr-only" for="username">{{ platform }} username</label>
+                <input
+                    id="username"
+                    type="text"
+                    name="username"
+                    placeholder="{{ platform }} username"
+                    autocomplete="username"
+                    autocapitalize="none"
+                    spellcheck="false"
+                    required
+                    autofocus
+                >
+                <button class="button button-primary" type="submit">Continue</button>
+            </form>
+        </section>
+    </main>
+</body>
+</html>

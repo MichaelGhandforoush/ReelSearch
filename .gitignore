@@ -1,0 +1,26 @@
+# Account-specific data
+accounts.json
+sync_state.json
+*_urls.json
+*_username.txt
+data/
+
+# Browser profiles (contain login sessions and cookies)
+selenium_profiles/
+
+# Vector database and downloaded videos
+chroma_db/
+videos/
+
+# Cookie exports
+*cookies*.txt
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Editor
+.cursorignore

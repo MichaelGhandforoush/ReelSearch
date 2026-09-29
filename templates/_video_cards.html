@@ -1,0 +1,33 @@
+{% for video in videos %}
+    <article
+        class="video-card"
+        data-video-url="{{ video }}"
+        data-video-source="{{ video_source|default('all') }}"
+    >
+        <button
+            type="button"
+            class="video-open-trigger"
+            aria-label="Open video in full screen"
+        ></button>
+        {% if 'tiktok.com' in video %}
+            {% set tiktok_id = video.split('/video/')[-1].split('?')[0].split('/')[0] %}
+            <div class="video-frame tiktok-embed-container">
+                <iframe
+                    src="https://www.tiktok.com/player/v1/{{ tiktok_id }}?autoplay=0&controls=1&description=0&music_info=0&rel=0"
+                    allow="autoplay; fullscreen"
+                    title="TikTok video"
+                    loading="{{ 'eager' if eager else 'lazy' }}"
+                    {% if not eager %}fetchpriority="low"{% endif %}
+                ></iframe>
+            </div>
+        {% else %}
+            <div class="video-frame instagram-frame-container">
+                <blockquote
+                    class="instagram-media"
+                    data-instgrm-permalink="{{ video }}"
+                    data-instgrm-version="14"
+                ></blockquote>
+            </div>
+        {% endif %}
+    </article>
+{% endfor %}

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Manage and search your saved social videos.">
+    <title>Saved Videos</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="preconnect" href="https://www.tiktok.com">
+    <script src="{{ url_for('static', filename='theme.js') }}"></script>
+</head>
+<body>
+    <main class="container library-container">
+        <header class="library-toolbar">
+            <a class="brand-mark" href="{{ url_for('home') }}">reel<span>search</span></a>
+            <div class="toolbar-meta">
+                <span><strong id="library-total">{{ total_videos }}</strong> saved</span>
+                <a class="toolbar-link" href="{{ url_for('accounts_route') }}" aria-label="Manage all accounts">
+                    <span class="toolbar-icon" aria-hidden="true">◎</span>
+                    <span>Accounts</span>
+                </a>
+                <button class="theme-toggle" type="button" data-theme-toggle aria-label="Toggle dark mode"><span aria-hidden="true">◐</span></button>
+            </div>
+        </header>
+
+        <section class="account-strip" aria-labelledby="connections-title">
+            <div class="account-strip-heading">
+                <span id="connections-title">Accounts</span>
+            </div>
+            <div class="connection-list">
+                {% for account in accounts %}
+                    <article class="connection-card compact-connection-card">
+                        <div class="connection-info">
+                            <a class="account-platform-link" href="{{ account.account_url }}" target="_blank" rel="noopener noreferrer" aria-label="Open {{ account.platform|capitalize }} profile">
+                                <div class="platform-icon platform-{{ account.platform }}" aria-hidden="true">
+                                    {{ account.abbreviation }}
+                                </div>
+                            </a>
+                            <div class="connection-details">
+                                <a class="account-name-link" href="{{ account.account_url }}" target="_blank" rel="noopener noreferrer">@{{ account.username }}</a>
+                                <p class="connection-status">{{ account.platform|capitalize }}</p>
+                            </div>
+                        </div>
+                        {% if account %}
+                            {% set sync_state = sync_states[account.id] %}
+                            <div class="sync-actions">
+                                <button
+                                    type="button"
+                                    class="text-action sync-control"
+                                    aria-label="Sync account"
+                                    data-platform="{{ account.id }}"
+                                    data-action-url="{{ url_for('sync_account_route', account_id=account.id) }}"
+                                    data-status-url="{{ url_for('sync_account_status_route', account_id=account.id) }}"
+                                >
+                                    <span class="sync-label">{{ 'Pause' if sync_state.status in ['collecting_urls', 'loading_videos', 'running', 'pause_requested'] else 'Sync' }}</span>
+                                </button>
+                                <span class="sync-state" data-sync-state="{{ account.id }}" aria-live="polite"></span>
+                            </div>
+                        {% endif %}
+                    </article>
+                {% endfor %}
+                {% if not accounts %}
+                    <p class="section-note">No accounts connected yet.</p>
+                {% endif %}
+            </div>
+        </section>
+
+        <section class="search-section search-hero" aria-labelledby="search-title">
+            <div class="section-heading">
+                <div>
+                    <p class="eyebrow">Your library</p>
+                    <h1 id="search-title">Find a clip.</h1>
+                </div>
+                <p class="section-note">Search by what you remember.</p>
+            </div>
+            <form action="{{ url_for('search') }}" method="POST" class="search-form" id="search-form">
+                <label class="sr-only" for="search-input">Search your saved videos</label>
+                <input
+                    id="search-input"
+                    type="search"
+                    name="query"
+                    value="{{ query or '' }}"
+                    placeholder="Search your videos"
+                    autocomplete="off"
+                    required
+                >
+            </form>
+        </section>
+
+        <div id="search-results" aria-live="polite">
+            {% include "_video_section.html" with context %}
+        </div>
+
+        <section class="videos-section" aria-labelledby="saved-videos-title">
+            <div class="section-heading">
+                <div>
+                    <p class="eyebrow">Your collection</p>
+                    <h2 id="saved-videos-title">All videos</h2>
+                </div>
+                <p class="section-note" id="video-progress">{{ videos|length }} of {{ total_videos }}</p>
+            </div>
+
+            <div class="video-grid" id="all-videos">
+                {% set video_source = 'all' %}
+                {% include "_video_cards.html" with context %}
+            </div>
+            <div class="load-more-wrap">
+                <button
+                    type="button"
+                    class="text-action load-more-button"
+                    id="load-more"
+                    data-offset="{{ videos|length }}"
+                    data-total="{{ total_videos }}"
+                    {% if videos|length >= total_videos %}hidden{% endif %}
+                >
+                    <span>Show more</span>
+                    <span aria-hidden="true">↓</span>
+                </button>
+                <span class="loading-indicator" id="loading-indicator" hidden>Loading more videos…</span>
+            </div>
+        </section>
+    </main>
+
+    <div class="video-viewer" id="video-viewer" hidden aria-hidden="true">
+        <button class="video-viewer-close" id="video-viewer-close" type="button" aria-label="Close full screen viewer">Close</button>
+        <div class="video-viewer-scroll" id="video-viewer-scroll"></div>
+    </div>
+
+    <script async src="https://www.instagram.com/embed.js"></script>
+    <script src="{{ url_for('static', filename='profile.js') }}" defer></script>
+</body>
+</html>

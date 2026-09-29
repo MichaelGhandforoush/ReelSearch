@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>All accounts</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="{{ url_for('static', filename='theme.js') }}"></script>
+</head>
+<body>
+    <main class="container">
+        <div class="page-bar">
+            <a class="back-link" href="{{ url_for('home') }}">← Back to library</a>
+            <button class="theme-toggle" type="button" data-theme-toggle aria-label="Toggle dark mode"><span aria-hidden="true">◐</span></button>
+        </div>
+        <section class="panel">
+            <div class="section-heading">
+                <div>
+                    <p class="eyebrow">Connections</p>
+                    <h1>All accounts</h1>
+                </div>
+                <a class="button button-primary" href="{{ url_for('add_account_route') }}">Add account</a>
+            </div>
+            <div class="connection-list accounts-connection-list">
+                {% for account in accounts %}
+                    <article class="connection-card">
+                        <div class="connection-info">
+                            <a class="account-platform-link" href="{{ account.account_url }}" target="_blank" rel="noopener noreferrer" aria-label="Open {{ account.platform|capitalize }} profile">
+                                <div class="platform-icon platform-{{ account.platform }}">{{ account.abbreviation }}</div>
+                            </a>
+                            <div class="connection-details">
+                                <h3><a class="account-name-link" href="{{ account.account_url }}" target="_blank" rel="noopener noreferrer">{{ account.platform|capitalize }}</a></h3>
+                                <p class="connection-status is-connected">Connected · @{{ account.username }}</p>
+                            </div>
+                        </div>
+                        <div class="account-sync-details">
+                            <div class="account-sync-heading">
+                                <span>{{ account.sync.status|replace('_', ' ')|capitalize }}</span>
+                                <span>Last sync: {{ account.sync.last_sync }}</span>
+                            </div>
+                            <div class="account-sync-stats">
+                                <span>{{ account.sync.source_total }} URLs</span>
+                                <span>{{ account.sync.loaded }} loaded</span>
+                                <span>{{ account.sync.remaining }} remaining</span>
+                            </div>
+                            {% if account.sync.current_url %}
+                                <p class="account-sync-current">Loading {{ account.sync.current_url }}</p>
+                            {% endif %}
+                            {% if account.sync.last_error %}
+                                <p class="account-sync-error">{{ account.sync.last_error }}</p>
+                            {% endif %}
+                        </div>
+                        <form method="POST" action="{{ url_for('logout_route') }}">
+                            <input type="hidden" name="account_id" value="{{ account.id }}">
+                            <button class="button button-danger" type="submit">Remove</button>
+                        </form>
+                    </article>
+                {% else %}
+                    <p class="section-note">No accounts connected yet.</p>
+                {% endfor %}
+            </div>
+        </section>
+        <section class="panel exit-panel">
+            <div>
+                <h2>Exit ReelSearch</h2>
+                <p class="section-note">Pauses running syncs so they can resume later, closes their browsers, and stops the app.</p>
+            </div>
+            <form method="POST" action="{{ url_for('shutdown_route') }}" id="exit-form">
+                <button class="button button-secondary" type="submit" id="exit-button">Exit app</button>
+            </form>
+        </section>
+    </main>
+    <script>
+        document.querySelector("#exit-form").addEventListener("submit", (event) => {
+            if (!window.confirm("Stop ReelSearch? Running syncs will be paused.")) {
+                event.preventDefault();
+                return;
+            }
+            const button = document.querySelector("#exit-button");
+            button.disabled = true;
+            button.textContent = "Stopping…";
+        });
+    </script>
+</body>
+</html>

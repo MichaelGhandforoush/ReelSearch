@@ -1,0 +1,43 @@
+{% if append %}
+    {% set videos = search_results %}
+    {% set eager = true %}
+    {% set video_source = 'search' %}
+    {% include "_video_cards.html" with context %}
+{% elif search_results is not none and query %}
+    <section class="results-section" aria-labelledby="results-title">
+        <div class="section-heading">
+            <div>
+                <p class="eyebrow">Results</p>
+                <h2 id="results-title">Matches for "{{ query }}"</h2>
+            </div>
+            <p class="section-note">{{ search_results|length }} shown</p>
+        </div>
+        {% if search_results %}
+            <div class="video-grid">
+                {% set videos = search_results %}
+                {% set eager = true %}
+                {% set video_source = 'search' %}
+                {% include "_video_cards.html" with context %}
+            </div>
+            {% if has_more %}
+            <div class="load-more-wrap search-load-more-wrap">
+                <button
+                    type="button"
+                    class="text-action load-more-search"
+                    data-query="{{ query }}"
+                    data-offset="{{ search_results|length }}"
+                >
+                    Show 2 more
+                    <span aria-hidden="true">↓</span>
+                </button>
+                <span class="loading-indicator" hidden>Loading more results…</span>
+            </div>
+            {% endif %}
+        {% else %}
+            <div class="empty-state">
+                <strong>No matches yet</strong>
+                <span>Try a broader search term.</span>
+            </div>
+        {% endif %}
+    </section>
+{% endif %}

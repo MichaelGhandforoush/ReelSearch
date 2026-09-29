@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manage logouts</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="{{ url_for('static', filename='theme.js') }}"></script>
+</head>
+<body>
+    <main class="container logout-page">
+        <a class="back-link" href="{{ url_for('home') }}">← Back to saved videos</a>
+        <section class="panel logout-panel">
+            <p class="eyebrow">Account settings</p>
+            <h1>Manage logouts</h1>
+            <p class="page-intro">
+                Disconnect a platform and permanently remove the videos saved from that account.
+            </p>
+
+            {% if error %}
+                <div class="inline-error" role="alert">{{ error }}</div>
+            {% endif %}
+            {% if success %}
+                <div class="success-message" role="status">{{ success }}</div>
+            {% endif %}
+
+            <div class="logout-list">
+                {% for account in accounts %}
+                    <article class="logout-card">
+                        <div class="connection-info">
+                            <a class="account-platform-link" href="{{ account.account_url }}" target="_blank" rel="noopener noreferrer" aria-label="Open {{ account.platform|capitalize }} profile">
+                                <div class="platform-icon platform-{{ account.platform }}" aria-hidden="true">
+                                    {{ account.abbreviation }}
+                                </div>
+                            </a>
+                            <div class="connection-details">
+                                <h2>{{ account.platform|capitalize }} · @{{ account.username }}</h2>
+                                <p class="connection-status is-connected">Connected</p>
+                            </div>
+                        </div>
+                        <form method="POST" action="{{ url_for('logout_route') }}">
+                            <input type="hidden" name="account_id" value="{{ account.id }}">
+                            <button
+                                class="button button-danger"
+                                type="submit"
+                            >
+                                Log out and delete videos
+                            </button>
+                        </form>
+                    </article>
+                {% else %}
+                    <p class="section-note">No accounts connected.</p>
+                {% endfor %}
+            </div>
+
+            <p class="warning-note">
+                This removes the platform’s saved videos and connection from this app.
+                It does not delete anything from Instagram or TikTok.
+            </p>
+        </section>
+    </main>
+</body>
+</html>

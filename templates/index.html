@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Search</title>
+
+    <style>
+
+        body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            background: #fafafa;
+        }
+
+        h1 {
+            text-align: center;
+        }
+
+        .search-container {
+            text-align: center;
+            margin: 30px;
+        }
+
+        .search-container input {
+            width: 500px;
+            padding: 12px;
+            font-size: 16px;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+        }
+
+        .search-container button {
+            padding: 12px 20px;
+            margin-left: 10px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+
+
+        .results {
+            display: flex;
+            justify-content: center;
+            gap: 25px;
+            flex-wrap: wrap;
+        }
+
+        .videos {
+            display: flex;
+            justify-content: center;
+            gap: 25px;
+            flex-wrap: wrap;
+        }
+
+
+        .instagram-card {
+            width: 320px;
+            background: white;
+            padding: 10px;
+            border-radius: 10px;
+        }
+
+
+    </style>
+
+</head>
+
+
+<body>
+
+
+<h1>
+    My Instagram Video Search
+</h1>
+
+<form method="POST" action="/load_videos" style="display:inline; margin-left:20px;">
+
+    <button type="submit">
+        Load Videos
+    </button>
+
+</form>
+
+<form method="POST" action="/profile" style="display:inline; margin-left:20px;">
+
+    <button type="submit">
+        Profile/Login
+    </button>
+
+</form>
+
+
+<div class="search-container">
+
+    <form method="POST" action="/search">
+
+        <input
+            type="text"
+            name="query"
+            placeholder="Search your videos..."
+        >
+
+        <button type="submit">
+            Search
+        </button>
+
+    </form>
+
+</div>
+{% if results and query %}
+<h2>Results for: {{query}}</h2>
+<div class="videos">
+{% for url in results %}
+    <div class="instagram-card">
+    <blockquote
+        class="instagram-media"
+        data-instgrm-permalink="{{ url }}"
+        data-instgrm-version="14">
+    </blockquote>
+    </div>
+{% endfor %}
+</div>
+{% endif %}
+{% if videos %}
+<h2>All videos</h2>
+<div class="videos">
+        {% for url in videos %}
+
+        <div class="instagram-card">
+
+            <blockquote
+                class="instagram-media"
+                data-instgrm-permalink="{{ url }}"
+                data-instgrm-version="14">
+            </blockquote>
+
+        </div>
+
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <script async src="https://www.instagram.com/embed.js"></script>
+
+<!-- Instagram embed script -->
+<script async src="//www.instagram.com/embed.js"></script>
+
+
+</body>
+
+</html>

@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Add account</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="{{ url_for('static', filename='theme.js') }}"></script>
+</head>
+<body>
+    <main class="container">
+        <a class="back-link" href="{{ url_for('accounts_route') }}">← Back to accounts</a>
+        <section class="panel">
+            <p class="eyebrow">New connection</p>
+            <h1>Add account</h1>
+            <p class="page-intro">Choose a supported platform. A browser will open for manual login; ReelSearch never stores your password.</p>
+            {% if error %}<div class="inline-error" role="alert">{{ error }}</div>{% endif %}
+            <form method="GET" action="{{ url_for('add_account_route') }}" class="search-form">
+                <label class="sr-only" for="platform">Platform</label>
+                <select id="platform" name="platform" required>
+                    <option value="">Select platform</option>
+                    {% for name in platforms %}
+                        <option value="{{ name }}">{{ name|capitalize }}</option>
+                    {% endfor %}
+                </select>
+                <button class="button button-primary" type="submit">Continue</button>
+            </form>
+        </section>
+    </main>
+</body>
+</html>

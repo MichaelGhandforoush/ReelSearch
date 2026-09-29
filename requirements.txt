@@ -1,0 +1,16 @@
+chromadb
+transformers
+yt-dlp
+faster-whisper
+sentence-transformers
+opencv-python
+pytesseract
+flask
+torch
+bitsandbytes
+selenium
+accelerate
+tesseract
+torchvision
+nltk
+scikit-learn
