@@ -25,3 +25,5 @@ __pycache__/
 # Editor
 .cursorignore
 .claude
+
+.claude/
