@@ -42,6 +42,9 @@
                                 <span>{{ account.sync.source_total }} URLs</span>
                                 <span>{{ account.sync.loaded }} loaded</span>
                                 <span>{{ account.sync.remaining }} remaining</span>
+                                {% if account.sync.ignored %}
+                                    <span>{{ account.sync.ignored }} ignored</span>
+                                {% endif %}
                             </div>
                             {% if account.sync.current_url %}
                                 <p class="account-sync-current">Loading {{ account.sync.current_url }}</p>
@@ -49,6 +52,78 @@
                             {% if account.sync.last_error %}
                                 <p class="account-sync-error">{{ account.sync.last_error }}</p>
                             {% endif %}
+                            <form class="account-settings" method="POST" action="{{ url_for('account_settings_route', account_id=account.id) }}" data-account-settings>
+                                <div class="account-settings-bar">
+                                    <button
+                                        type="button"
+                                        class="advanced-toggle account-settings-toggle"
+                                        aria-expanded="false"
+                                        aria-controls="settings-{{ account.id }}"
+                                    >
+                                        <span>Settings</span>
+                                        <span class="advanced-caret" aria-hidden="true">▾</span>
+                                    </button>
+                                    <span class="account-settings-status" role="status" aria-live="polite"></span>
+                                </div>
+                                <div class="advanced-search account-settings-panel" id="settings-{{ account.id }}" hidden>
+                                    <div class="advanced-tabs" role="tablist" aria-label="Account settings">
+                                        <button type="button" role="tab" id="tab-sync-{{ account.id }}" aria-controls="panel-sync-{{ account.id }}" aria-selected="true">Syncing</button>
+                                        <button type="button" role="tab" id="tab-processing-{{ account.id }}" aria-controls="panel-processing-{{ account.id }}" aria-selected="false" tabindex="-1">Processing</button>
+                                    </div>
+                                    <div class="advanced-panel" role="tabpanel" id="panel-sync-{{ account.id }}" aria-labelledby="tab-sync-{{ account.id }}">
+                                        <div class="account-setting">
+                                            <label>
+                                                <input type="checkbox" name="new_only" value="1" data-autosubmit {% if account.settings.sync_mode == 'new' %}checked{% endif %}>
+                                                Only check for new videos
+                                            </label>
+                                            <p class="account-setting-note">Syncs stop once they reach videos found before, instead of checking every saved video for any that were missed.</p>
+                                        </div>
+                                        <div class="account-setting">
+                                            <label>
+                                                <input type="checkbox" name="skip_backlog" value="1" data-autosubmit {% if account.settings.skip_backlog %}checked{% endif %}>
+                                                Skip the backlog
+                                            </label>
+                                            <p class="account-setting-note">Videos found by earlier syncs that have not loaded yet are ignored, so syncs only load the videos they newly find. Turn it off to load them again from the next sync.</p>
+                                        </div>
+                                        <fieldset class="account-setting">
+                                            <legend>Loading speed</legend>
+                                            {% for value, label, note in [
+                                                ('slow', 'Slow', 'One video at a time with short pauses. Least likely to be timed out by the platform.'),
+                                                ('medium', 'Medium', 'A few videos at once. The default.'),
+                                                ('fast', 'Fast', 'More videos at once. Quicker, but more likely to be rate limited or timed out.'),
+                                            ] %}
+                                                <label>
+                                                    <input type="radio" name="load_speed" value="{{ value }}" data-autosubmit {% if account.settings.load_speed == value %}checked{% endif %}>
+                                                    {{ label }}
+                                                    <span class="account-setting-note">{{ note }}</span>
+                                                </label>
+                                            {% endfor %}
+                                        </fieldset>
+                                    </div>
+                                    <div class="advanced-panel" role="tabpanel" id="panel-processing-{{ account.id }}" aria-labelledby="tab-processing-{{ account.id }}" hidden>
+                                        <fieldset class="account-setting">
+                                            <legend>Make videos searchable by</legend>
+                                            <p class="account-setting-note">Applies to videos added from now on. The caption is always used.</p>
+                                            {% for name, label, note in [
+                                                ('use_transcript', 'What is said', 'Transcribes the audio.'),
+                                                ('use_ocr', 'Text on screen', 'Reads text from a few frames.' if ocr_available else 'Needs Tesseract installed; skipped until then.'),
+                                                ('use_comments', 'Comments', 'Keeps comments that add detail, such as the uploader’s own.'),
+                                                ('use_visual_description', 'What is shown', 'An AI model describes the frames. Much slower; best with a GPU.'),
+                                            ] %}
+                                                <label>
+                                                    <input type="checkbox" name="{{ name }}" value="1" data-autosubmit {% if account.settings[name] %}checked{% endif %}>
+                                                    {{ label }}
+                                                    <span class="account-setting-note">{{ note }}</span>
+                                                </label>
+                                            {% endfor %}
+                                        </fieldset>
+                                    </div>
+                                </div>
+                                <noscript>
+                                    <style>.account-settings-panel[hidden], .account-settings-panel .advanced-panel[hidden] { display: block; } .account-settings-toggle, .account-settings-panel .advanced-tabs { display: none; }</style>
+                                    <button class="button button-secondary" type="submit">Save</button>
+                                </noscript>
+                            </form>
                         </div>
                         <form method="POST" action="{{ url_for('logout_route') }}">
                             <input type="hidden" name="account_id" value="{{ account.id }}">
@@ -60,6 +135,18 @@
                 {% endfor %}
             </div>
         </section>
+        <section class="panel storage-panel" data-storage data-report-url="{{ url_for('storage_route') }}">
+            <h2>Storage</h2>
+            <p class="section-note" data-storage-usage>Checking disk use…</p>
+            <form class="storage-form" method="POST" action="{{ url_for('storage_cleanup_route') }}" data-storage-form hidden>
+                <p class="section-note">Leftovers that nothing uses any more. Choose what to remove:</p>
+                <div class="storage-list" data-storage-list></div>
+                <div class="storage-actions">
+                    <button class="button button-danger" type="submit" data-storage-button>Clean up</button>
+                    <span class="account-settings-status" role="status" aria-live="polite" data-storage-status></span>
+                </div>
+            </form>
+        </section>
         <section class="panel exit-panel">
             <div>
                 <h2>Exit ReelSearch</h2>
@@ -70,6 +157,7 @@
             </form>
         </section>
     </main>
+    <script src="{{ url_for('static', filename='accounts.js') }}" defer></script>
     <script>
         document.querySelector("#exit-form").addEventListener("submit", (event) => {
             if (!window.confirm("Stop ReelSearch? Running syncs will be paused.")) {

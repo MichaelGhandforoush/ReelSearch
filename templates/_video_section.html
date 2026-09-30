@@ -2,32 +2,40 @@
     {% set videos = search_results %}
     {% set eager = true %}
     {% set video_source = 'search' %}
+    {% set weak_match = weak|default(false) %}
     {% include "_video_cards.html" with context %}
-{% elif search_results is not none and query %}
+{% elif search_results is not none %}
     <section class="results-section" aria-labelledby="results-title">
         <div class="section-heading">
             <div>
                 <p class="eyebrow">Results</p>
-                <h2 id="results-title">Matches for "{{ query }}"</h2>
+                <h2 id="results-title">{{ search_heading }}</h2>
             </div>
             <p class="section-note">{{ search_results|length }} shown</p>
         </div>
-        {% if search_results %}
+        {% if not search_results and has_weak %}
+            <div class="empty-state weak-empty-state">
+                <strong>No strong matches</strong>
+                <span>Nothing in your library is a close match. Try other words, or see the nearest videos anyway.</span>
+            </div>
+        {% endif %}
+        {% if search_results or has_weak %}
             <div class="video-grid">
                 {% set videos = search_results %}
                 {% set eager = true %}
                 {% set video_source = 'search' %}
                 {% include "_video_cards.html" with context %}
             </div>
-            {% if has_more %}
+            {% if has_more or has_weak %}
             <div class="load-more-wrap search-load-more-wrap">
                 <button
                     type="button"
                     class="text-action load-more-search"
-                    data-query="{{ query }}"
+                    data-params="{{ search_params }}"
                     data-offset="{{ search_results|length }}"
+                    {% if not has_more %}data-weak="1"{% endif %}
                 >
-                    Show 2 more
+                    {{ "Show more" if has_more else "Show weaker matches" }}
                     <span aria-hidden="true">↓</span>
                 </button>
                 <span class="loading-indicator" hidden>Loading more results…</span>
@@ -36,7 +44,7 @@
         {% else %}
             <div class="empty-state">
                 <strong>No matches yet</strong>
-                <span>Try a broader search term.</span>
+                <span>Try a broader search term or fewer filters.</span>
             </div>
         {% endif %}
     </section>

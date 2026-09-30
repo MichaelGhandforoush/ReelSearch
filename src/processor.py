@@ -1,8 +1,13 @@
 import json
 import os
+import random
 import re
 import shutil
+import threading
+import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 import cv2
 import pytesseract
@@ -38,8 +43,183 @@ COMMENT_SPAM_PATTERN = re.compile(
 )
 
 
+ERROR_REASONS = (
+    (("private", "login required", "log in", "sign in", "cookies"),
+     "the video is private or needs a login; check your cookies file and "
+     "that the account is signed in"),
+    (("unavailable", "removed", "deleted", "not found", "404",
+      "does not exist"),
+     "the video was removed or is no longer available"),
+    (("429", "too many requests", "rate limit", "rate-limit"),
+     "the platform is rate limiting requests; try fewer workers or wait"),
+    (("unable to download", "timed out", "timeout", "connection",
+      "network", "name or service", "getaddrinfo"),
+     "a network problem interrupted the download"),
+    (("unsupported url",), "the link is not a supported video URL"),
+    (("ffmpeg", "ffprobe"), "ffmpeg is missing or failed"),
+)
+
+
+# Failures worth retrying: the same request may well work a little later.
+RATE_LIMIT_WORDS = ("429", "too many requests", "rate limit", "rate-limit")
+TRANSIENT_WORDS = RATE_LIMIT_WORDS + (
+    "timed out", "timeout", "connection", "network", "reset by peer",
+    "forcibly closed", "10054", "temporarily unavailable", "502", "503",
+    "504", "incomplete read", "unable to download webpage",
+)
+# Cores kept free for the scraping browser, the web app, and the OS. With
+# every core busy transcribing, Chrome stops answering Selenium and the
+# scraper loses its connection to it.
+RESERVED_CORES = 2
+# The optional processing steps, named as Processor attributes. Each can be
+# overridden for a single video with process_video(url, features=...).
+FEATURES = (
+    "use_transcript", "use_ocr", "use_comments", "use_visual_description"
+)
+# Downloads at once per platform. Each platform is a separate host, so their
+# downloads do not slow each other down.
+DEFAULT_DOWNLOAD_WORKERS = 3
+# How hard an account's videos are loaded: "slow" downloads one at a time
+# with a pause after each, so the platform rarely times it out; "medium" is
+# the standard behaviour; "fast" downloads a couple more at once and is more
+# likely to be rate limited.
+LOAD_SPEEDS = ("slow", "medium", "fast")
+DEFAULT_LOAD_SPEED = "medium"
+FAST_EXTRA_WORKERS = 2
+SLOW_PAUSE_SECONDS = (2.0, 4.0)
+
+
+# Failures that will never succeed, such as photo-only posts: the video is
+# marked as unloadable so later syncs stop retrying it.
+UNLOADABLE_WORDS = (
+    "there is no video in this post",
+    "no video formats found",
+)
+
+
+def download_workers_for(speed, medium_workers):
+    """Downloads allowed at once per platform at a load speed."""
+    if speed == "slow":
+        return 1
+    if speed == "fast":
+        return medium_workers + FAST_EXTRA_WORKERS
+    return medium_workers
+
+
+def default_cpu_workers():
+    """Videos transcribed at once, with a few cores for each Whisper run."""
+    cores = os.cpu_count() or 4
+    return max(1, min(6, (cores - RESERVED_CORES) // 3))
+
+
+def is_transient_error(error):
+    text = f"{type(error).__name__} {error}".lower()
+    return any(word in text for word in TRANSIENT_WORDS)
+
+
+def is_unloadable_error(error):
+    text = str(error).lower()
+    return any(word in text for word in UNLOADABLE_WORDS)
+
+
+def is_rate_limit_error(error):
+    text = str(error).lower()
+    return any(word in text for word in RATE_LIMIT_WORDS)
+
+
+class AdaptiveLimit:
+    """A concurrency limit that backs off when a platform pushes back.
+
+    Up to `maximum` callers hold a slot at once. A network failure halves
+    the limit so fewer requests hit the platform together, and every
+    `recover_after` successes in a row raise it by one, so it climbs back
+    to the maximum once the connection is healthy again.
+    """
+
+    def __init__(self, maximum, recover_after=5):
+        self.maximum = max(1, maximum)
+        self.limit = self.maximum
+        self.recover_after = recover_after
+        self.active = 0
+        self._successes = 0
+        self._condition = threading.Condition()
+
+    def __enter__(self):
+        with self._condition:
+            while self.active >= self.limit:
+                self._condition.wait()
+            self.active += 1
+        return self
+
+    def __exit__(self, *exc_info):
+        with self._condition:
+            self.active -= 1
+            self._condition.notify_all()
+
+    def succeeded(self):
+        with self._condition:
+            self._successes += 1
+            if (
+                self._successes >= self.recover_after
+                and self.limit < self.maximum
+            ):
+                self._successes = 0
+                self.limit += 1
+                self._condition.notify_all()
+
+    def failed(self):
+        with self._condition:
+            self._successes = 0
+            self.limit = max(1, self.limit // 2)
+
+
+def explain_error(error):
+    """Return 'reason (ExceptionType: details)' for an exception."""
+    detail = re.sub(r"\s+", " ", str(error)).strip() or "no details given"
+    lowered = detail.lower()
+    for keywords, reason in ERROR_REASONS:
+        if any(keyword in lowered for keyword in keywords):
+            return f"{reason} ({type(error).__name__}: {detail})"
+    return f"{type(error).__name__}: {detail}"
+
+
+class QuietLogger:
+    """yt-dlp logger that hides warnings which are expected without cookies."""
+
+    IGNORED_WARNINGS = ("No CSRF token set by Instagram API",)
+
+    def debug(self, message):
+        pass
+
+    def info(self, message):
+        pass
+
+    def warning(self, message):
+        if not any(text in message for text in self.IGNORED_WARNINGS):
+            print(message)
+
+    def error(self, message):
+        print(message)
+
+
+class ProcessingError(Exception):
+    """A video failed at a named step, with the reason attached."""
+
+    def __init__(self, step, error):
+        super().__init__(f"{step} failed - {explain_error(error)}")
+        self.step = step
+
+
 class Processor:
     """Download, enrich, and embed saved videos."""
+
+    # yt-dlp's own retries for a connection dropped mid-request; failures
+    # that get past these are retried by _extract() after a longer pause.
+    network_options = {
+        "socket_timeout": 30,
+        "retries": 5,
+        "extractor_retries": 3,
+    }
 
     def __init__(
         self,
@@ -49,6 +229,8 @@ class Processor:
         use_ocr=True,
         use_comments=True,
         use_visual_description=False,
+        download_workers=1,
+        cpu_workers=1,
     ):
         """Choose which generated descriptions go into the embedding.
 
@@ -56,16 +238,43 @@ class Processor:
         use_ocr: text read from keyframes (still needs Tesseract installed).
         use_comments: filtered uploader/viewer comments.
         use_visual_description: VLM-written description of the keyframes.
+        download_workers: how many videos may download at once from each
+            platform; lowered automatically while the platform is failing.
+        cpu_workers: how many videos may be transcribed, read, and embedded
+            at once, across every thread using this processor.
         """
         self.use_transcript = use_transcript
         self.use_ocr = use_ocr
         self.use_comments = use_comments
         self.use_visual_description = use_visual_description
+        self.output_dir = output_dir
+        self.download_workers = max(1, download_workers)
+        self.cpu_workers = max(1, cpu_workers)
+        # The limits are shared by every sync, so syncing several accounts
+        # at once queues their work instead of multiplying it.
+        self.download_limits = {
+            (platform, speed): AdaptiveLimit(
+                download_workers_for(speed, self.download_workers)
+            )
+            for platform in ("instagram", "tiktok", "unknown")
+            for speed in LOAD_SPEEDS
+        }
+        self.cpu_slots = threading.BoundedSemaphore(self.cpu_workers)
+        self.download_attempts = 4
+        self.retry_delay_seconds = 3
+        self.rate_limit_delay_seconds = 30
+        # One Whisper worker per CPU slot lets transcriptions run side by
+        # side; splitting the spare cores between them avoids oversubscribing
+        # the CPU.
+        spare_cores = max(1, (os.cpu_count() or 4) - RESERVED_CORES)
         self.transcribe_model = WhisperModel(
             "base",
             device="cpu",
             compute_type="int8",
+            num_workers=self.cpu_workers,
+            cpu_threads=max(1, spare_cores // self.cpu_workers),
         )
+        self._generator_lock = threading.Lock()
         self.embed_model = embed_model
         self.max_ocr_frames = 6
         self.max_transcript_seconds = 180
@@ -91,37 +300,164 @@ class Processor:
                 "to its executable path."
             )
 
-        self.cookies_tiktok = "/content/www.tiktok.com_cookies.txt"
-        self.cookies_instagram = "/content/www.instagram.com_cookies.txt"
-        common_options = {
+        self.cookie_files = {
+            "tiktok": "/content/www.tiktok.com_cookies.txt",
+            "instagram": "/content/www.instagram.com_cookies.txt",
+        }
+        self.download_options = {
             "outtmpl": f"{output_dir}/%(id)s.%(ext)s",
             "format": "mp4",
-            "writeinfojson": True,
+            # Comments and stats come from what extract_info returns, so no
+            # .info.json is written next to each download.
+            "writeinfojson": False,
             "getcomments": use_comments,
             "quiet": True,
+            **self.network_options,
         }
-        self.ydl_instagram = yt_dlp.YoutubeDL({
-            **common_options,
-            "cookiefile": self.cookies_instagram,
-        })
-        self.ydl_tiktok = yt_dlp.YoutubeDL({
-            **common_options,
-            "cookiefile": self.cookies_tiktok,
-        })
+        self.details_options = {
+            "quiet": True, "skip_download": True, **self.network_options
+        }
+        # YoutubeDL is not thread-safe, so each worker thread gets its own.
+        self._local = threading.local()
+        # URLs that failed in a way retrying cannot fix (no video in them).
+        self.unloadable_urls = set()
 
-    def download(self, url, output_dir="videos"):
-        ydl = self.ydl_tiktok if "tiktok" in url else self.ydl_instagram
+    def _ydl(self, url, details=False, comments=None):
+        platform = "tiktok" if "tiktok" in url else "instagram"
+        comments = self.use_comments if comments is None else comments
+        clients = getattr(self._local, "ydl_clients", None)
+        if clients is None:
+            clients = self._local.ydl_clients = {}
+        key = (platform, details, not details and comments)
+        if key not in clients:
+            options = (
+                self.details_options if details
+                else {**self.download_options, "getcomments": comments}
+            )
+            options = {**options, "logger": QuietLogger()}
+            # Cookies are optional: public videos download without them.
+            cookie_file = self.cookie_files[platform]
+            if os.path.isfile(cookie_file):
+                options["cookiefile"] = cookie_file
+            clients[key] = yt_dlp.YoutubeDL(options)
+        return clients[key]
+
+    def _extract(self, url, details=False, comments=None, speed=None):
+        """Run yt-dlp for a URL, retrying network failures with backoff.
+
+        Each attempt holds one of the platform's download slots, and a
+        network failure lowers how many there are, so parallel downloads
+        thin out on their own when the platform starts dropping connections
+        instead of every worker failing at once. The load speed sets how
+        many slots there are; slow also pauses before releasing each one.
+        """
+        speed = speed if speed in LOAD_SPEEDS else DEFAULT_LOAD_SPEED
+        limit = self.download_limits[(self.get_platform(url), speed)]
+        ydl = self._ydl(url, details=details, comments=comments)
+        for attempt in range(1, self.download_attempts + 1):
+            try:
+                with limit:
+                    info = ydl.extract_info(url, download=not details)
+                    if speed == "slow":
+                        time.sleep(random.uniform(*SLOW_PAUSE_SECONDS))
+            except Exception as error:
+                if not is_transient_error(error):
+                    raise
+                limit.failed()
+                if attempt == self.download_attempts:
+                    raise
+                base = (
+                    self.rate_limit_delay_seconds
+                    if is_rate_limit_error(error)
+                    else self.retry_delay_seconds
+                )
+                delay = base * 2 ** (attempt - 1) * random.uniform(0.8, 1.2)
+                print(
+                    f"Retrying {url} in {delay:.0f}s (attempt {attempt + 1} "
+                    f"of {self.download_attempts}): {explain_error(error)}"
+                )
+                time.sleep(delay)
+            else:
+                limit.succeeded()
+                return info
+
+    def download(self, url, output_dir="videos", comments=None, speed=None):
+        """comments: fetch the video's comments too (default use_comments).
+        speed: one of LOAD_SPEEDS (default medium)."""
         try:
-            info = ydl.extract_info(url, download=True)
+            info = self._extract(url, comments=comments, speed=speed)
+            entry = self._first_entry(info)
             return (
-                f"{output_dir}/{info['id']}.mp4",
-                info.get("description", ""),
-                info.get("uploader", ""),
-                info.get("comments") or [],
+                self._downloaded_path(entry, output_dir),
+                info.get("description") or entry.get("description", ""),
+                info.get("uploader") or entry.get("uploader", ""),
+                info.get("comments") or entry.get("comments") or [],
+                self.video_stats({**entry, **info}),
             )
         except Exception as error:
-            print(f"Skipping {url}: {error}")
+            if is_unloadable_error(error):
+                self.unloadable_urls.add(url)
+                print(f"Skipping {url} for good: it has no video to load.")
+            else:
+                print(
+                    f"Skipping {url}: download failed - {explain_error(error)}"
+                )
             return None
+
+    @staticmethod
+    def _first_entry(info):
+        """A carousel post comes back as a playlist; use its first video and
+        delete the files of any others, since only one is indexed."""
+        if info.get("_type") != "playlist":
+            return info
+        entries = [entry for entry in info.get("entries") or [] if entry]
+        for extra in entries[1:]:
+            for download in extra.get("requested_downloads") or []:
+                path = download.get("filepath")
+                if path and os.path.exists(path):
+                    os.remove(path)
+        return entries[0] if entries else info
+
+    @staticmethod
+    def _downloaded_path(info, output_dir):
+        """Where yt-dlp actually saved the video. The file is named after
+        the media id, which is not always the id in the post URL."""
+        for download in info.get("requested_downloads") or []:
+            if download.get("filepath"):
+                return download["filepath"]
+        return f"{output_dir}/{info['id']}.mp4"
+
+    def fetch_details(self, url):
+        """Read upload date, length and counts without downloading the video."""
+        try:
+            return self.video_stats(self._extract(url, details=True))
+        except Exception as error:
+            print(
+                f"Could not read details for {url} (upload date, length and "
+                f"counts left blank): {explain_error(error)}"
+            )
+            return None
+
+    @staticmethod
+    def video_stats(info):
+        uploaded_at = info.get("timestamp")
+        upload_date = info.get("upload_date")
+        if uploaded_at is None and upload_date:
+            try:
+                uploaded_at = datetime.strptime(upload_date, "%Y%m%d").replace(
+                    tzinfo=timezone.utc
+                ).timestamp()
+            except ValueError:
+                pass
+        stats = {
+            "uploaded_at": uploaded_at,
+            "likes": info.get("like_count"),
+        }
+        # Chroma metadata cannot hold None, and bools are ints in Python.
+        return {
+            key: value for key, value in stats.items()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
 
     @staticmethod
     def _normalize_text(text):
@@ -235,12 +571,14 @@ class Processor:
         )
 
     def generate_description(self, prompt):
-        self._load_visual_description_model()
-        response = self.generator(
-            prompt,
-            do_sample=False,
-            max_new_tokens=60,
-        )
+        # The VLM is one shared model, so worker threads take turns with it.
+        with self._generator_lock:
+            self._load_visual_description_model()
+            response = self.generator(
+                prompt,
+                do_sample=False,
+                max_new_tokens=60,
+            )
         return response[0]["generated_text"]
 
     def extract_keyframes(self, path, max_frames=None):
@@ -346,7 +684,6 @@ class Processor:
     def generate_description_with_frames(self, frames, prompt):
         from PIL import Image
 
-        self._load_visual_description_model()
         images = [Image.fromarray(frame) for frame in frames[:3]]
         messages = [{
             "role": "user",
@@ -355,11 +692,13 @@ class Processor:
                 {"type": "text", "text": prompt},
             ],
         }]
-        response = self.generator(
-            messages,
-            do_sample=False,
-            max_new_tokens=60,
-        )
+        with self._generator_lock:
+            self._load_visual_description_model()
+            response = self.generator(
+                messages,
+                do_sample=False,
+                max_new_tokens=60,
+            )
         return response[0]["generated_text"][-1]["content"]
 
     @staticmethod
@@ -371,12 +710,23 @@ class Processor:
             return "tiktok"
         return "unknown"
 
-    def _build_description(self, video):
+    def features(self, overrides=None):
+        """The processing steps to run: this processor's own settings, with
+        any of FEATURES in overrides replacing them."""
+        chosen = {name: getattr(self, name) for name in FEATURES}
+        chosen.update(
+            (name, bool(value)) for name, value in (overrides or {}).items()
+            if name in FEATURES
+        )
+        return chosen
+
+    def _build_description(self, video, features=None):
         """Combine the enabled frame-based descriptions (OCR and VLM)."""
+        features = features or self.features()
         parts = []
-        if self.use_ocr:
+        if features["use_ocr"]:
             parts.append(self.extract_text_from_frames(video.frames))
-        if self.use_visual_description and video.frames:
+        if features["use_visual_description"] and video.frames:
             prompt = self.get_prompt(
                 video.transcript,
                 video.caption,
@@ -387,32 +737,57 @@ class Processor:
             )
         return " ".join(part for part in parts if part).strip()
 
-    def process_video(self, url):
+    def process_video(self, url, features=None, speed=None):
+        """Download a video and build its searchable text and embedding.
+
+        features: overrides for the optional steps in FEATURES, such as
+            {"use_comments": False}; others use this processor's settings.
+        speed: how aggressively to download, one of LOAD_SPEEDS.
+        """
+        features = self.features(features)
         video = Video(url)
+        step = "download"
         try:
-            result = self.download(video.url)
+            result = self.download(
+                video.url, comments=features["use_comments"], speed=speed
+            )
             if result is None:
+                # download() already printed why it was skipped.
                 return None
-            video.path, video.caption, video.user, comments = result
-            if self.use_transcript:
-                video.transcript = self.transcribe(video.path)
-            if self.use_ocr or self.use_visual_description:
-                video.frames = self.extract_keyframes(video.path)
-            video.description = self._build_description(video)
-            if self.use_comments:
-                video.comments = self.select_comments(
-                    comments,
-                    video.user,
-                    " ".join((
-                        video.caption,
-                        video.transcript,
-                        video.description,
-                    )),
-                )
-            video.embedding = self.embed_model.encode(video.to_document())
+            (
+                video.path, video.caption, video.user, comments, video.stats
+            ) = result
+            # Downloads wait on the network and this part on the CPU, so it
+            # has its own limit: other videos keep downloading meanwhile.
+            with self.cpu_slots:
+                if features["use_transcript"]:
+                    step = "transcription"
+                    video.transcript = self.transcribe(video.path)
+                if features["use_ocr"] or features["use_visual_description"]:
+                    step = "keyframe extraction"
+                    video.frames = self.extract_keyframes(video.path)
+                step = "frame description (OCR/visual)"
+                video.description = self._build_description(video, features)
+                if features["use_comments"]:
+                    step = "comment selection"
+                    video.comments = self.select_comments(
+                        comments,
+                        video.user,
+                        " ".join((
+                            video.caption,
+                            video.transcript,
+                            video.description,
+                        )),
+                    )
+                step = "embedding"
+                video.embedding = self.embed_model.encode(video.to_document())
+            print(f"Processed {url}")
             return video
         except Exception as error:
-            print(f"Failed processing {url}: {error}")
+            print(
+                f"Skipping {url}: {ProcessingError(step, error)}. "
+                "It was downloaded but not added to the library."
+            )
             return None
         finally:
             if video.path and os.path.exists(video.path):
@@ -429,11 +804,14 @@ class Processor:
         with open(path, "r") as file:
             urls = json.load(file)
         failed = 0
-        for url in urls[start_number:stop_number]:
-            print(url)
-            video = self.process_video(url)
-            if video is None:
-                failed += 1
-                continue
-            collection.add(video)
+        with ThreadPoolExecutor(
+            max_workers=self.download_workers + self.cpu_workers
+        ) as executor:
+            for video in executor.map(
+                self.process_video, urls[start_number:stop_number]
+            ):
+                if video is None:
+                    failed += 1
+                    continue
+                collection.add(video)
         return failed

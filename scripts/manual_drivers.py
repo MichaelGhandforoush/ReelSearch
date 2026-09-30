@@ -1,3 +1,7 @@
+"""Check that Instagram and TikTok get separate browsers and profiles.
+
+Run from the repo root: python -m scripts.manual_drivers
+"""
 from src.instagram import Instagram
 from src.tiktok import TikTok
 

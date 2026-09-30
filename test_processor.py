@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -7,7 +9,7 @@ import pytest
 
 # Change this import if your Processor class lives in a different module.
 # For example: from src.processor import Processor
-from src.processor import Processor
+from src.processor import AdaptiveLimit, Processor
 
 
 @pytest.fixture
@@ -28,6 +30,8 @@ def processor(monkeypatch, tmp_path):
     # Patch __init__ dependencies by constructing the object normally after
     # replacing the expensive external components.
     p = Processor(embed_model=MagicMock(), output_dir=str(tmp_path))
+    # Retries would otherwise really wait between attempts.
+    monkeypatch.setattr("src.processor.time.sleep", lambda _: None)
 
     return p
 
@@ -67,20 +71,26 @@ def test_get_prompt(processor):
 
 
 def test_transcribe(processor):
+    # The model is told to stop at the limit (clip_timestamps). The loop
+    # only stops once a segment has already ended past it, so the segment
+    # that crosses the limit is kept and the ones after it are not.
     processor.transcribe_model.transcribe.return_value = (
         [
             SimpleNamespace(text=" Hello   world ", end=2.0),
             SimpleNamespace(text=" This is a test ", end=5.0),
-            SimpleNamespace(text=" ignored after limit ", end=200.0),
+            SimpleNamespace(text=" crosses the limit ", end=200.0),
+            SimpleNamespace(text=" after the limit ", end=205.0),
         ],
         None,
     )
 
     result = processor.transcribe("video.mp4")
 
-    assert result == "Hello world This is a test"
+    assert result == "Hello world This is a test crosses the limit"
 
     processor.transcribe_model.transcribe.assert_called_once()
+    _, kwargs = processor.transcribe_model.transcribe.call_args
+    assert kwargs["clip_timestamps"] == "0,180"
 
 
 def test_transcribe_ignores_empty_segments(processor):
@@ -96,7 +106,7 @@ def test_transcribe_ignores_empty_segments(processor):
 
 
 def test_download_tiktok(processor):
-    processor.ydl_tiktok.extract_info.return_value = {
+    processor._ydl("tiktok").extract_info.return_value = {
         "id": "abc123",
         "description": "A TikTok",
         "uploader": "user1",
@@ -112,16 +122,17 @@ def test_download_tiktok(processor):
         "A TikTok",
         "user1",
         [],
+        {},
     )
 
-    processor.ydl_tiktok.extract_info.assert_called_once_with(
+    processor._ydl("tiktok").extract_info.assert_called_once_with(
         "https://www.tiktok.com/@user/video/abc123",
         download=True,
     )
 
 
 def test_download_instagram(processor):
-    processor.ydl_instagram.extract_info.return_value = {
+    processor._ydl("instagram").extract_info.return_value = {
         "id": "xyz789",
         "description": "An Instagram reel",
         "uploader": "user2",
@@ -137,13 +148,14 @@ def test_download_instagram(processor):
         "An Instagram reel",
         "user2",
         [],
+        {},
     )
 
-    processor.ydl_instagram.extract_info.assert_called_once()
+    processor._ydl("instagram").extract_info.assert_called_once()
 
 
 def test_download_returns_none_on_error(processor, capsys):
-    processor.ydl_tiktok.extract_info.side_effect = Exception("network error")
+    processor._ydl("tiktok").extract_info.side_effect = Exception("network error")
 
     result = processor.download(
         "https://www.tiktok.com/@user/video/123"
@@ -151,6 +163,102 @@ def test_download_returns_none_on_error(processor, capsys):
 
     assert result is None
     assert "Skipping" in capsys.readouterr().out
+
+
+def test_download_retries_network_errors_then_succeeds(processor):
+    ydl = processor._ydl("instagram")
+    ydl.extract_info.side_effect = [
+        Exception("('Connection aborted.', ConnectionResetError(10054))"),
+        {"id": "abc", "description": "caption", "uploader": "user"},
+    ]
+
+    result = processor.download("https://www.instagram.com/reel/abc/")
+
+    assert result[0].endswith("abc.mp4")
+    assert ydl.extract_info.call_count == 2
+
+
+def test_download_does_not_retry_permanent_errors(processor):
+    ydl = processor._ydl("instagram")
+    ydl.extract_info.side_effect = Exception("This video has been removed")
+
+    assert processor.download("https://www.instagram.com/reel/abc/") is None
+    assert ydl.extract_info.call_count == 1
+
+
+def test_download_gives_up_after_the_last_attempt(processor):
+    ydl = processor._ydl("instagram")
+    ydl.extract_info.side_effect = Exception("timed out")
+
+    assert processor.download("https://www.instagram.com/reel/abc/") is None
+    assert ydl.extract_info.call_count == processor.download_attempts
+
+
+def test_network_failures_lower_the_download_limit_until_it_recovers():
+    limit = AdaptiveLimit(4, recover_after=2)
+
+    limit.failed()
+    assert limit.limit == 2
+    limit.failed()
+    limit.failed()
+    assert limit.limit == 1
+
+    for _ in range(6):
+        limit.succeeded()
+    assert limit.limit == 4
+    limit.succeeded()
+    limit.succeeded()
+    assert limit.limit == 4
+
+
+def test_download_limit_caps_how_many_run_at_once():
+    limit = AdaptiveLimit(2)
+    running = []
+    peak = []
+    lock = threading.Lock()
+
+    def work():
+        with limit:
+            with lock:
+                running.append(1)
+                peak.append(len(running))
+            time.sleep(0.02)
+            with lock:
+                running.pop()
+
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert max(peak) == 2
+
+
+def test_video_stats_keeps_numeric_fields_and_parses_upload_date():
+    stats = Processor.video_stats({
+        "upload_date": "20240102",
+        "duration": 42.5,
+        "view_count": 1000,
+        "like_count": None,
+        "is_live": True,
+    })
+
+    assert stats == {
+        "uploaded_at": 1704153600.0,
+    }
+
+
+def test_video_stats_prefers_exact_timestamp():
+    stats = Processor.video_stats({"timestamp": 123, "upload_date": "20240102"})
+
+    assert stats == {"uploaded_at": 123}
+
+
+def test_fetch_details_returns_none_on_error(processor):
+    processor._ydl("instagram", details=True).extract_info.side_effect = Exception("x")
+
+    assert processor.fetch_details("https://www.instagram.com/reel/1/") is None
 
 
 def test_select_comments_keeps_only_new_descriptive_comments(processor):
@@ -295,7 +403,7 @@ def test_process_video(monkeypatch, processor):
     )
 
     processor.download = MagicMock(
-        return_value=("videos/123.mp4", "caption", "user", [])
+        return_value=("videos/123.mp4", "caption", "user", [], {"likes": 5})
     )
     processor.transcribe = MagicMock(return_value="transcript")
     processor.extract_keyframes = MagicMock(return_value=[])
@@ -312,8 +420,9 @@ def test_process_video(monkeypatch, processor):
     assert fake_video.transcript == "transcript"
     assert fake_video.description == "OCR text"
     assert fake_video.embedding == [0.1, 0.2, 0.3]
+    assert fake_video.stats == {"likes": 5}
 
-    processor.download.assert_called_once_with(fake_video.url)
+    processor.download.assert_called_once_with(fake_video.url, comments=True, speed=None)
     processor.transcribe.assert_called_once_with("videos/123.mp4")
     processor.extract_keyframes.assert_called_once_with("videos/123.mp4")
     processor.extract_text_from_frames.assert_called_once()
@@ -396,7 +505,7 @@ def _stub_pipeline(processor):
     processor.download = MagicMock(
         return_value=("videos/1.mp4", "caption", "user", [
             {"text": "Nice knife skills chef", "like_count": 1},
-        ])
+        ], {})
     )
     processor.transcribe = MagicMock(return_value="transcript")
     processor.extract_keyframes = MagicMock(return_value=["frame"])
@@ -459,3 +568,129 @@ def test_process_video_ocr_and_visual_description_combined(processor):
     video = processor.process_video("https://www.tiktok.com/@u/video/1")
 
     assert video.description == "OCR text VLM text"
+
+
+def test_process_video_features_override_for_one_call(processor):
+    _stub_pipeline(processor)
+
+    video = processor.process_video(
+        "https://www.tiktok.com/@u/video/1",
+        {"use_transcript": False, "use_comments": False},
+    )
+
+    assert video.transcript == ""
+    assert video.comments == ""
+    assert video.description == "OCR text"
+    processor.transcribe.assert_not_called()
+    processor.download.assert_called_once_with(
+        "https://www.tiktok.com/@u/video/1", comments=False, speed=None
+    )
+    # The override does not change the processor's own settings.
+    assert processor.use_transcript and processor.use_comments
+
+
+def test_features_ignores_unknown_names(processor):
+    assert processor.features({"use_ocr": False, "unknown": True}) == {
+        "use_transcript": True,
+        "use_ocr": False,
+        "use_comments": True,
+        "use_visual_description": False,
+    }
+
+
+def test_ydl_fetches_comments_only_when_asked(monkeypatch, processor):
+    made = []
+    monkeypatch.setattr(
+        "src.processor.yt_dlp.YoutubeDL",
+        lambda options: made.append(options) or MagicMock(),
+    )
+    url = "https://www.instagram.com/reel/1/"
+
+    with_comments = processor._ydl(url, comments=True)
+    without_comments = processor._ydl(url, comments=False)
+
+    assert with_comments is not without_comments
+    assert [options["getcomments"] for options in made] == [True, False]
+    assert processor._ydl(url, comments=False) is without_comments
+
+
+def test_download_workers_follow_load_speed():
+    from src.processor import download_workers_for
+    assert download_workers_for("slow", 3) == 1
+    assert download_workers_for("medium", 3) == 3
+    assert download_workers_for("fast", 3) > 3
+
+
+def test_load_speed_picks_its_own_download_limit():
+    processor = Processor(
+        embed_model=MagicMock(), download_workers=3
+    )
+    slow = processor.download_limits[("instagram", "slow")]
+    medium = processor.download_limits[("instagram", "medium")]
+    fast = processor.download_limits[("instagram", "fast")]
+    assert slow.maximum == 1 < medium.maximum < fast.maximum
+
+
+def test_download_uses_the_path_yt_dlp_saved_to(processor):
+    processor._ydl("instagram").extract_info.return_value = {
+        "id": "POSTCODE",
+        "requested_downloads": [{"filepath": "videos/MEDIAID.mp4"}],
+    }
+
+    result = processor.download("https://www.instagram.com/p/POSTCODE/")
+
+    assert result[0] == "videos/MEDIAID.mp4"
+
+
+def test_download_uses_the_first_video_of_a_carousel(processor):
+    processor._ydl("instagram").extract_info.return_value = {
+        "_type": "playlist",
+        "id": "POST",
+        "description": "caption",
+        "entries": [
+            {"id": "one", "requested_downloads": [{"filepath": "videos/one.mp4"}]},
+        ],
+    }
+
+    result = processor.download("https://www.instagram.com/p/POST/")
+
+    assert result[0] == "videos/one.mp4"
+    assert result[1] == "caption"
+
+
+def test_posts_without_a_video_are_marked_unloadable(processor):
+    url = "https://www.instagram.com/p/photo/"
+    processor._ydl("instagram").extract_info.side_effect = Exception(
+        "ERROR: [Instagram] photo: There is no video in this post"
+    )
+
+    assert processor.download(url) is None
+    assert url in processor.unloadable_urls
+    assert processor._ydl("instagram").extract_info.call_count == 1
+
+
+def test_downloads_write_no_info_json_but_still_return_comments_and_stats(
+    monkeypatch, processor,
+):
+    made = []
+    ydl = MagicMock()
+    ydl.extract_info.return_value = {
+        "id": "abc",
+        "description": "caption",
+        "uploader": "user1",
+        "comments": [{"text": "great recipe", "author": "friend"}],
+        "like_count": 42,
+        "timestamp": 1700000000,
+    }
+    monkeypatch.setattr(
+        "src.processor.yt_dlp.YoutubeDL",
+        lambda options: made.append(options) or ydl,
+    )
+
+    result = processor.download(
+        "https://www.instagram.com/reel/abc/", comments=True
+    )
+
+    assert made[0]["writeinfojson"] is False
+    assert result[3] == [{"text": "great recipe", "author": "friend"}]
+    assert result[4] == {"uploaded_at": 1700000000, "likes": 42}

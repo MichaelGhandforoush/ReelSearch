@@ -1,3 +1,7 @@
+"""Open an Instagram login window by hand. Needs INSTAGRAM_USERNAME.
+
+Run from the repo root: python -m scripts.manual_instagram_login
+"""
 import os
 
 from src.instagram import Instagram

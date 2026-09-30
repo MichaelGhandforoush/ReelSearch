@@ -1,14 +1,21 @@
 {% for video in videos %}
+    {% set meta = (video_meta|default({})).get(video) or {} %}
     <article
-        class="video-card"
+        class="video-card{% if weak_match|default(false) %} weak-match{% endif %}"
         data-video-url="{{ video }}"
         data-video-source="{{ video_source|default('all') }}"
+        data-rank="{{ search_offset|default(0) + loop.index0 }}"
+        {% if meta.likes is defined %}data-likes="{{ meta.likes }}"{% endif %}
+        {% if meta.uploaded_at is defined %}data-uploaded-at="{{ meta.uploaded_at }}"{% endif %}
     >
         <button
             type="button"
             class="video-open-trigger"
             aria-label="Open video in full screen"
         ></button>
+        {% if weak_match|default(false) %}
+            <span class="weak-match-badge">Weak match</span>
+        {% endif %}
         {% if 'tiktok.com' in video %}
             {% set tiktok_id = video.split('/video/')[-1].split('?')[0].split('/')[0] %}
             <div class="video-frame tiktok-embed-container">
@@ -21,12 +28,19 @@
                 ></iframe>
             </div>
         {% else %}
+            {# Served by /embed/instagram, which strips Instagram's header,
+               footer and links so only the video remains. #}
             <div class="video-frame instagram-frame-container">
-                <blockquote
-                    class="instagram-media"
-                    data-instgrm-permalink="{{ video }}"
-                    data-instgrm-version="14"
-                ></blockquote>
+                <iframe
+                    class="instagram-embed"
+                    src="{{ url_for('instagram_embed', url=video, autoplay=0) }}"
+                    allow="autoplay; fullscreen"
+                    allowfullscreen
+                    scrolling="no"
+                    title="Instagram video"
+                    loading="{{ 'eager' if eager else 'lazy' }}"
+                    {% if not eager %}fetchpriority="low"{% endif %}
+                ></iframe>
             </div>
         {% endif %}
     </article>

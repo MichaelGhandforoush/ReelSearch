@@ -99,6 +99,7 @@ from .base_platform import Platform
 
 class Instagram(Platform):
     abbreviation = "IG"
+    cookie_domain = "instagram.com"
 
     def __init__(
         self, username, account_id=None, profile_path=None, urls_path=None

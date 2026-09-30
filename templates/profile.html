@@ -74,16 +74,193 @@
                 <p class="section-note">Search by what you remember.</p>
             </div>
             <form action="{{ url_for('search') }}" method="POST" class="search-form" id="search-form">
-                <label class="sr-only" for="search-input">Search your saved videos</label>
-                <input
-                    id="search-input"
-                    type="search"
-                    name="query"
-                    value="{{ query or '' }}"
-                    placeholder="Search your videos"
-                    autocomplete="off"
-                    required
-                >
+                <div class="search-bar">
+                    <div class="search-input-wrap{% if similar %} has-similar{% endif %}">
+                        {# Shown while the results are "More like this" for a video,
+                           in place of typed words. #}
+                        <span
+                            class="similar-chip"
+                            id="similar-chip"
+                            data-url="{{ similar or '' }}"
+                            {% if not similar %}hidden{% endif %}
+                        >
+                            <span class="similar-chip-kicker">More like</span>
+                            <span class="similar-chip-label" id="similar-chip-label">{{ similar_label or '' }}</span>
+                            <button
+                                type="button"
+                                class="similar-chip-clear"
+                                id="similar-clear"
+                                aria-label="Stop showing videos like this one"
+                                title="Clear"
+                            ><span aria-hidden="true">×</span></button>
+                        </span>
+                        <label class="sr-only" for="search-input">Search your saved videos</label>
+                        <input
+                            id="search-input"
+                            type="search"
+                            name="query"
+                            value="{{ query or '' }}"
+                            placeholder="{{ 'Or type to search instead' if similar else 'Search your videos, or "quote" exact words' }}"
+                            data-placeholder="Search your videos, or &quot;quote&quot; exact words"
+                            autocomplete="off"
+                            list="search-suggestions"
+                        >
+                        <button
+                            type="button"
+                            class="save-search"
+                            id="save-search"
+                            aria-pressed="false"
+                            aria-label="Save this search"
+                            title="Save this search"
+                        ><span aria-hidden="true">☆</span></button>
+                    </div>
+                    <button
+                        type="button"
+                        class="advanced-toggle"
+                        id="advanced-toggle"
+                        aria-expanded="false"
+                        aria-controls="advanced-search"
+                    >
+                        <span>Advanced</span>
+                        <span class="advanced-count" id="advanced-count" hidden></span>
+                        <span class="advanced-caret" aria-hidden="true">▾</span>
+                    </button>
+                </div>
+                <datalist id="search-suggestions"></datalist>
+
+                <div class="advanced-search" id="advanced-search" hidden>
+                    <div class="advanced-tabs" role="tablist" aria-label="Advanced search">
+                        <button type="button" role="tab" id="tab-filters" aria-controls="panel-filters" aria-selected="true">Filters</button>
+                        <button type="button" role="tab" id="tab-sources" aria-controls="panel-sources" aria-selected="false" tabindex="-1">Accounts &amp; platforms</button>
+                        <button type="button" role="tab" id="tab-saved" aria-controls="panel-saved" aria-selected="false" tabindex="-1">Saved searches</button>
+                        <button type="button" class="text-action clear-filters" id="clear-filters" hidden>Reset</button>
+                    </div>
+
+                    <div class="advanced-panel" role="tabpanel" id="panel-filters" aria-labelledby="tab-filters">
+                        {% set no_details = 'Not available yet: fetch video details first' %}
+                        <div class="search-filters">
+                            <fieldset
+                                class="filter-group"
+                                data-filter="uploaded"
+                                {% if not facets.uploaded_at %}disabled title="{{ no_details }}"{% endif %}
+                            >
+                                <legend>Uploaded</legend>
+                                <div class="segmented">
+                                    {% for value, label in [('', 'Any time'), ('week', 'Past week'), ('month', 'Past month'), ('year', 'Past year')] %}
+                                        <label class="segment">
+                                            <input type="radio" name="uploaded" value="{{ value }}" {% if filters.uploaded == value %}checked{% endif %}>
+                                            <span>{{ label }}</span>
+                                        </label>
+                                    {% endfor %}
+                                </div>
+                            </fieldset>
+                            {% set order_labels = {
+                                '': ('Default order', 'Reversed order'),
+                                'newest': ('Newest first', 'Oldest first'),
+                                'likes': ('Most liked first', 'Least liked first'),
+                            } %}
+                            <fieldset class="filter-group" data-filter="sort">
+                                <legend>Sort by</legend>
+                                <div class="sort-row">
+                                <div class="segmented">
+                                    {% for value, label, available in [('', 'Best match', true), ('newest', 'Posted', facets.uploaded_at), ('likes', 'Likes', facets.likes)] %}
+                                        <label class="segment" {% if not available %}title="{{ no_details }}"{% endif %}>
+                                            <input type="radio" name="sort" value="{{ value }}" {% if filters.sort == value %}checked{% endif %} {% if not available %}disabled{% endif %}>
+                                            <span>{{ label }}</span>
+                                        </label>
+                                    {% endfor %}
+                                </div>
+                                <button
+                                    type="button"
+                                    class="reverse-toggle"
+                                    id="reverse-sort"
+                                    aria-pressed="{{ 'true' if filters.reverse else 'false' }}"
+                                    title="Reverse the sort order"
+                                >
+                                    <span class="reverse-icon" aria-hidden="true">⇅</span>
+                                    <span class="reverse-label">{{ order_labels[filters.sort][1 if filters.reverse else 0] }}</span>
+                                </button>
+                                </div>
+                            </fieldset>
+                        </div>
+
+                        {% if facets.missing_details or details_job.running %}
+                            <p class="details-note" id="details-note">
+                                <span id="details-status">
+                                    {% if details_job.running %}
+                                        Fetching details · {{ details_job.done }} of {{ details_job.total }}
+                                    {% else %}
+                                        {{ facets.missing_details }} video{{ '' if facets.missing_details == 1 else 's' }} saved before upload dates and likes were recorded.
+                                    {% endif %}
+                                </span>
+                                <button
+                                    type="button"
+                                    class="text-action"
+                                    id="fetch-details"
+                                    data-action-url="{{ url_for('fetch_details_route') }}"
+                                    data-status-url="{{ url_for('details_status_route') }}"
+                                    data-running="{{ 'true' if details_job.running else 'false' }}"
+                                    {% if details_job.running %}hidden{% endif %}
+                                >Fetch details</button>
+                            </p>
+                        {% endif %}
+                    </div>
+
+                    <div class="advanced-panel" role="tabpanel" id="panel-sources" aria-labelledby="tab-sources" hidden>
+                        {% set all_sources = not filters.platform and not filters.account %}
+                        {% if facets.sources %}
+                            <p class="panel-hint">Search only videos saved from the selected accounts.</p>
+                            <div class="source-list">
+                                {% for source in facets.sources %}
+                                    {% set platform_selected = all_sources or source.platform in filters.platform %}
+                                    <fieldset class="source-group">
+                                        <legend class="sr-only">{{ source.label }}</legend>
+                                        <label class="source-option source-platform">
+                                            <input
+                                                type="checkbox"
+                                                data-source-platform="{{ source.platform }}"
+                                                data-label="{{ source.label }}"
+                                                {% if platform_selected %}checked{% endif %}
+                                            >
+                                            <span class="platform-icon platform-{{ source.platform }}" aria-hidden="true">{{ source.abbreviation }}</span>
+                                            <span>All of {{ source.label }}</span>
+                                        </label>
+                                        {% for account in source.accounts %}
+                                            <label class="source-option source-account">
+                                                <input
+                                                    type="checkbox"
+                                                    data-source-account="{{ account.id }}"
+                                                    data-platform="{{ source.platform }}"
+                                                    data-label="@{{ account.username }}"
+                                                    {% if platform_selected or account.id in filters.account %}checked{% endif %}
+                                                >
+                                                <span>@{{ account.username }}</span>
+                                            </label>
+                                        {% endfor %}
+                                    </fieldset>
+                                {% endfor %}
+                            </div>
+                            <p class="panel-hint source-warning" id="source-warning" hidden>Keep at least one account or platform selected.</p>
+                        {% else %}
+                            <p class="panel-hint">No accounts connected yet.</p>
+                        {% endif %}
+                    </div>
+
+                    <div class="advanced-panel" role="tabpanel" id="panel-saved" aria-labelledby="tab-saved" hidden>
+                        <div class="search-shortcuts" id="search-shortcuts">
+                            <div class="shortcut-group" id="saved-searches" hidden>
+                                <span class="shortcut-label">Saved</span>
+                                <div class="chip-list"></div>
+                            </div>
+                            <div class="shortcut-group" id="recent-searches" hidden>
+                                <span class="shortcut-label">Recent</span>
+                                <div class="chip-list"></div>
+                                <button type="button" class="text-action shortcut-clear" id="clear-recent">Clear</button>
+                            </div>
+                            <p class="panel-hint" id="shortcuts-empty">No saved or recent searches yet. Use ☆ in the search bar to save one.</p>
+                        </div>
+                    </div>
+                </div>
             </form>
         </section>
 
@@ -97,21 +274,23 @@
                     <p class="eyebrow">Your collection</p>
                     <h2 id="saved-videos-title">All videos</h2>
                 </div>
-                <p class="section-note" id="video-progress">{{ videos|length }} of {{ total_videos }}</p>
+                <p class="section-note" id="video-progress">{{ videos|length }} of {{ library_matching }}</p>
             </div>
 
             <div class="video-grid" id="all-videos">
                 {% set video_source = 'all' %}
+                {% set search_offset = 0 %}
                 {% include "_video_cards.html" with context %}
             </div>
+            <p class="empty-state" id="library-empty" {% if library_matching %}hidden{% endif %}>No videos match these filters.</p>
             <div class="load-more-wrap">
                 <button
                     type="button"
                     class="text-action load-more-button"
                     id="load-more"
                     data-offset="{{ videos|length }}"
-                    data-total="{{ total_videos }}"
-                    {% if videos|length >= total_videos %}hidden{% endif %}
+                    data-total="{{ library_matching }}"
+                    {% if videos|length >= library_matching %}hidden{% endif %}
                 >
                     <span>Show more</span>
                     <span aria-hidden="true">↓</span>
@@ -124,9 +303,44 @@
     <div class="video-viewer" id="video-viewer" hidden aria-hidden="true">
         <button class="video-viewer-close" id="video-viewer-close" type="button" aria-label="Close full screen viewer">Close</button>
         <div class="video-viewer-scroll" id="video-viewer-scroll"></div>
+        <button
+            class="viewer-info-toggle"
+            id="viewer-info-toggle"
+            type="button"
+            aria-controls="viewer-info"
+            aria-expanded="true"
+            title="Show or hide video details (I)"
+        >
+            <span class="viewer-info-toggle-icon" aria-hidden="true">i</span>
+            <span class="viewer-info-toggle-label">Hide details</span>
+        </button>
+        <aside class="viewer-info" id="viewer-info" aria-label="Video details" aria-live="polite">
+            <a class="viewer-info-open" id="viewer-info-link" href="#" target="_blank" rel="noopener noreferrer">
+                <span class="platform-icon" id="viewer-info-icon" aria-hidden="true"></span>
+                <span class="viewer-info-open-text">
+                    <span class="viewer-info-kicker">Open on</span>
+                    <strong id="viewer-info-platform"></strong>
+                </span>
+                <span class="viewer-info-arrow" aria-hidden="true">↗</span>
+            </a>
+            <dl class="viewer-info-list">
+                <div data-info="uploader"><dt>Posted by</dt><dd></dd></div>
+                <div data-info="posted"><dt>Posted</dt><dd></dd></div>
+                <div data-info="likes"><dt>Likes</dt><dd></dd></div>
+                <div data-info="saved_by"><dt>Saved from</dt><dd></dd></div>
+            </dl>
+            <button class="viewer-info-similar" id="viewer-info-similar" type="button">
+                <span aria-hidden="true">≈</span>
+                <span>More like this</span>
+            </button>
+            <div class="viewer-info-caption" data-info="caption">
+                <h3>Caption</h3>
+                <p></p>
+            </div>
+        </aside>
     </div>
 
-    <script async src="https://www.instagram.com/embed.js"></script>
+    <script src="{{ url_for('static', filename='settings.js') }}" defer></script>
     <script src="{{ url_for('static', filename='profile.js') }}" defer></script>
 </body>
 </html>

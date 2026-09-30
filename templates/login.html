@@ -21,28 +21,52 @@
                     <h1>Connect {{ platform }}</h1>
                 </div>
             </div>
-            <p class="page-intro">Enter your {{ platform }} username. A browser window will open so you can log in; ReelSearch never stores your password.</p>
-            {% if error %}<div class="inline-error" role="alert">{{ error }}</div>{% endif %}
-            <form
-                action="{{ url_for('login_platform_route', platform=platform.lower()) }}"
-                method="POST"
-                class="search-form login-form"
-            >
-                <label class="sr-only" for="username">{{ platform }} username</label>
-                <input
-                    id="username"
-                    type="text"
-                    name="username"
-                    placeholder="{{ platform }} username"
-                    autocomplete="username"
-                    autocapitalize="none"
-                    spellcheck="false"
-                    required
-                    autofocus
+            {% if pending %}
+                <p class="page-intro">A browser window has opened for {{ platform }}. Log in to <strong>@{{ username }}</strong> there. The account is connected as soon as you are logged in, or press Continue when you are done. ReelSearch never stores your password.</p>
+                <div
+                    class="login-waiting"
+                    id="login-waiting"
+                    data-status-url="{{ pending.status_url }}"
+                    data-confirm-url="{{ pending.confirm_url }}"
+                    data-cancel-url="{{ pending.cancel_url }}"
+                    data-done-url="{{ pending.done_url }}"
+                    data-leave-url="{{ pending.leave_url }}"
                 >
-                <button class="button button-primary" type="submit">Continue</button>
-            </form>
+                    <p class="login-status" id="login-status" role="status" aria-live="polite">Opening the browser…</p>
+                    <p class="login-notice" id="login-notice" role="alert" hidden></p>
+                    <div class="inline-error" id="login-error" role="alert" hidden></div>
+                    <div class="login-actions" id="login-actions">
+                        <button class="button button-primary" type="button" id="login-continue">Continue</button>
+                        <button class="button button-secondary" type="button" id="login-cancel">Cancel</button>
+                    </div>
+                    <a class="button button-primary login-retry" id="login-retry" href="{{ pending.retry_url }}" hidden>Try again</a>
+                </div>
+            {% else %}
+                <p class="page-intro">Enter your {{ platform }} username. A browser window will open so you can log in; ReelSearch never stores your password, and the account is only added once you have logged in.</p>
+                {% if error %}<div class="inline-error" role="alert">{{ error }}</div>{% endif %}
+                <form
+                    action="{{ url_for('login_platform_route', platform=platform.lower()) }}"
+                    method="POST"
+                    class="search-form login-form"
+                >
+                    <label class="sr-only" for="username">{{ platform }} username</label>
+                    <input
+                        id="username"
+                        type="text"
+                        name="username"
+                        value="{{ username or '' }}"
+                        placeholder="{{ platform }} username"
+                        autocomplete="username"
+                        autocapitalize="none"
+                        spellcheck="false"
+                        required
+                        autofocus
+                    >
+                    <button class="button button-primary" type="submit">Continue</button>
+                </form>
+            {% endif %}
         </section>
     </main>
+    {% if pending %}<script src="{{ url_for('static', filename='login.js') }}" defer></script>{% endif %}
 </body>
 </html>
