@@ -343,3 +343,33 @@ def test_owned_ids_counts_shared_videos_and_skips_removed_owners(collection):
     assert collection.owned_ids("b") == {shared, only_b, removed}
     assert collection.owned_ids("nobody") == set()
     assert sorted(collection.ids()) == [shared, only_b, removed]
+
+
+def test_added_at_is_set_on_first_add_and_kept_on_later_adds(
+    collection, monkeypatch,
+):
+    url = "https://www.instagram.com/reel/1/"
+    monkeypatch.setattr("src.collection.time.time", lambda: 1000.0)
+    video = Video(url)
+    video.embedding = FakeEmbedModel().encode("dog")
+    video.stats = {}
+
+    assert collection.add(video, account_id="first") is True
+    monkeypatch.setattr("src.collection.time.time", lambda: 2000.0)
+    assert collection.add(video, account_id="second") is False
+
+    metadata, _ = collection.get_video(url)
+    assert metadata["added_at"] == 1000.0
+    assert metadata[account_key("second")] == 1
+
+
+def test_records_saved_before_added_at_existed_stay_without_it(collection):
+    url = "https://www.instagram.com/reel/1/"
+    collection.collection.add(
+        ids=[url], embeddings=[[1.0, 0.0, 0.0]], documents=["old"],
+        metadatas=[{"platform": "instagram"}],
+    )
+
+    add_video(collection, url, "dog", account_id="acc")
+
+    assert "added_at" not in collection.get_video(url)[0]

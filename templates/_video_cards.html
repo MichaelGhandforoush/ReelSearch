@@ -7,6 +7,7 @@
         data-rank="{{ search_offset|default(0) + loop.index0 }}"
         {% if meta.likes is defined %}data-likes="{{ meta.likes }}"{% endif %}
         {% if meta.uploaded_at is defined %}data-uploaded-at="{{ meta.uploaded_at }}"{% endif %}
+        {% if meta.added_at is defined %}data-added-at="{{ meta.added_at }}"{% endif %}
     >
         <button
             type="button"

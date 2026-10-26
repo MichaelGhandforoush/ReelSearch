@@ -14,6 +14,56 @@ import json
 import os
 
 
+class LoginRequired(Exception):
+    """The browser profile has no login session, so syncing can't start."""
+
+
+def write_cookie_file(driver, path, domain):
+    """Save the browser's cookies for one site as a Netscape cookies.txt,
+    the format yt-dlp reads. Returns how many cookies were written.
+
+    The file holds a live login, so only the owner may read it where the
+    OS supports that.
+    """
+    cookies = driver.execute_cdp_cmd(
+        "Network.getAllCookies", {}
+    ).get("cookies", [])
+    lines = ["# Netscape HTTP Cookie File"]
+    for cookie in cookies:
+        host = cookie.get("domain", "")
+        bare = host.lstrip(".")
+        name, value = cookie.get("name", ""), cookie.get("value", "")
+        if not (bare == domain or bare.endswith("." + domain)):
+            continue
+        if not name or any(char in name + value for char in "\t\r\n"):
+            continue
+        expires = cookie.get("expires") or 0
+        # 0 marks a session cookie; Chrome reports those as -1.
+        expires = 0 if cookie.get("session") or expires < 0 else int(expires)
+        lines.append("\t".join((
+            host,
+            "TRUE" if host.startswith(".") else "FALSE",
+            cookie.get("path") or "/",
+            "TRUE" if cookie.get("secure") else "FALSE",
+            str(expires),
+            name,
+            value,
+        )))
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    temp_path = f"{path}.tmp"
+    try:
+        descriptor = os.open(
+            temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as file:
+            file.write("\n".join(lines) + "\n")
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    return len(lines) - 1
+
+
 class Platform(ABC):
     abbreviation = ""
 
@@ -68,6 +118,33 @@ class Platform(ABC):
             and cookie.get("domain", "").lstrip(".").endswith(self.cookie_domain)
             for cookie in cookies
         )
+
+    # How often open_saved_page checks for the login cookie.
+    login_poll_seconds = 0.5
+
+    def open_saved_page(self, wait_seconds=20):
+        """Open the saved page for a sync without waiting for anyone.
+
+        The saved login usually shows up at once; the wait only covers a
+        slow browser start. Raises LoginRequired if the profile has none.
+        """
+        self.open_login()
+        deadline = time.monotonic() + wait_seconds
+        while not self.is_logged_in():
+            if time.monotonic() >= deadline:
+                raise LoginRequired(
+                    f"No {self.platform} login found for @{self.username}."
+                )
+            time.sleep(self.login_poll_seconds)
+        self.prepare_saved_page()
+
+    def prepare_saved_page(self):
+        """Get the saved page ready to scroll. Platforms override this when
+        the saved videos are behind something that must be clicked."""
+
+    def save_cookies(self, path):
+        """Write this browser's login for the platform to a cookies.txt."""
+        return write_cookie_file(self.driver, path, self.cookie_domain)
 
 
     @abstractmethod

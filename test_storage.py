@@ -179,3 +179,18 @@ def test_remove_profile_never_touches_legacy_profiles(monkeypatch):
 
     assert account_store.remove_profile(LEGACY) is True
     assert calls == []
+
+
+def test_report_finds_saved_logins_of_removed_accounts(tree, tmp_path):
+    write(tmp_path / "cookies" / "aa11.txt", "live")
+    write(tmp_path / "cookies" / "cc33.txt", "orphan")
+
+    report = storage_report(**tree)
+
+    assert names(report["categories"]["cookie_files"]) == ["cc33.txt"]
+    assert report["categories"]["cookie_files"]["bytes"] == 6
+
+    storage_cleanup(report, ["cookie_files"], lambda key: None)
+
+    assert (tmp_path / "cookies" / "aa11.txt").exists()
+    assert not (tmp_path / "cookies" / "cc33.txt").exists()

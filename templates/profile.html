@@ -51,6 +51,7 @@
                                     data-platform="{{ account.id }}"
                                     data-action-url="{{ url_for('sync_account_route', account_id=account.id) }}"
                                     data-status-url="{{ url_for('sync_account_status_route', account_id=account.id) }}"
+                                    data-login-url="{{ url_for('accounts_route') }}"
                                 >
                                     <span class="sync-label">{{ 'Pause' if sync_state.status in ['collecting_urls', 'loading_videos', 'running', 'pause_requested'] else 'Sync' }}</span>
                                 </button>
@@ -126,6 +127,14 @@
                         <span class="advanced-caret" aria-hidden="true">▾</span>
                     </button>
                 </div>
+                {# Shown while only videos added since a sync are listed, from
+                   "Show new videos" after a sync. #}
+                <div class="added-filter" id="added-filter" data-added-after="{{ filters.added_after }}" {% if not filters.added_after %}hidden{% endif %}>
+                    <span class="chip">
+                        <span class="chip-apply" id="added-filter-label">{{ added_after_label or '' }}</span>
+                        <button type="button" class="chip-remove" id="added-clear" aria-label="Show all videos again" title="Clear">×</button>
+                    </span>
+                </div>
                 <datalist id="search-suggestions"></datalist>
 
                 <div class="advanced-search" id="advanced-search" hidden>
@@ -158,13 +167,14 @@
                                 '': ('Default order', 'Reversed order'),
                                 'newest': ('Newest first', 'Oldest first'),
                                 'likes': ('Most liked first', 'Least liked first'),
+                                'added': ('Recently saved first', 'Earliest saved first'),
                             } %}
                             <fieldset class="filter-group" data-filter="sort">
                                 <legend>Sort by</legend>
                                 <div class="sort-row">
                                 <div class="segmented">
-                                    {% for value, label, available in [('', 'Best match', true), ('newest', 'Posted', facets.uploaded_at), ('likes', 'Likes', facets.likes)] %}
-                                        <label class="segment" {% if not available %}title="{{ no_details }}"{% endif %}>
+                                    {% for value, label, available, unavailable in [('', 'Best match', true, ''), ('newest', 'Posted', facets.uploaded_at, no_details), ('likes', 'Likes', facets.likes, no_details), ('added', 'Recently saved', facets.added_at, 'Not available yet: sync an account first')] %}
+                                        <label class="segment" {% if not available %}title="{{ unavailable }}"{% endif %}>
                                             <input type="radio" name="sort" value="{{ value }}" {% if filters.sort == value %}checked{% endif %} {% if not available %}disabled{% endif %}>
                                             <span>{{ label }}</span>
                                         </label>

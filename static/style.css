@@ -1032,6 +1032,20 @@ code {
     color: var(--danger);
 }
 
+/* "Added since" a sync, from "Show new videos". */
+.added-filter {
+    margin-top: 8px;
+}
+
+.added-filter[hidden] {
+    display: none;
+}
+
+.added-filter .chip-apply {
+    padding: 4px 2px 4px 10px;
+    cursor: default;
+}
+
 .shortcut-clear {
     color: var(--muted);
     font-size: 0.78rem;

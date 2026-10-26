@@ -2,6 +2,7 @@ import chromadb
 import json
 import os
 import re
+import time
 
 
 def platform_from_url(url):
@@ -133,10 +134,18 @@ class Collection:
         self.collection = self.client.get_or_create_collection(name=name)
 
     def add(self, video, account_id=None, platform=None):
+        """Save a video, returning whether it is new to the library."""
         metadata = {**video.stats, "details_checked": 1}
         platform = platform or platform_from_url(video.url)
         existing = self.collection.get(ids=[video.url], include=["metadatas"])
+        created = not existing["ids"]
         previous = (existing["metadatas"] or [None])[0] or {}
+        # When the video first joined the library. Records saved before this
+        # was tracked have none, so they never count as newly added.
+        if created:
+            metadata["added_at"] = time.time()
+        elif "added_at" in previous:
+            metadata["added_at"] = previous["added_at"]
         # Keep every account that already saved this video, so a second
         # account syncing it doesn't take it away from the first.
         for key, value in previous.items():
@@ -155,6 +164,7 @@ class Collection:
             documents=[video.to_document()],
             metadatas=[metadata],
         )
+        return created
 
     def search(self, query, num_results=6, where=None, phrases=None,
                with_distances=False):

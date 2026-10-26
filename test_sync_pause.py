@@ -1,4 +1,7 @@
 import json
+import os
+
+import pytest
 
 from src.base_platform import Platform
 
@@ -287,3 +290,207 @@ def test_scrape_blocks_media_while_scrolling_then_unblocks(
     ]
     assert blocked[0] == platform.blocked_media
     assert blocked[-1] == []
+
+
+class FakeSyncPlatform(FakePlatform):
+    """Opens its saved page without a browser; scraping finds nothing."""
+
+    def __init__(self, urls_path, logged_in):
+        super().__init__(urls_path)
+        self.logged_in = logged_in
+        self.scraped = False
+
+    def open_login(self):
+        self.driver = None
+
+    def is_logged_in(self):
+        return self.logged_in
+
+    def scrape_videos(self, **kwargs):
+        self.scraped = True
+        return set()
+
+
+def _no_input(*args):
+    raise AssertionError("Syncing must not wait for the console.")
+
+
+def test_sync_starts_without_reading_the_console(
+    app_module, tmp_path, monkeypatch
+):
+    monkeypatch.setattr("builtins.input", _no_input)
+    account = app_module.account_store.create_account("instagram", "alice")
+    platform = FakeSyncPlatform(tmp_path / "urls.json", logged_in=True)
+
+    app_module.sync_platform(platform, account)
+
+    assert platform.scraped
+    assert app_module.get_sync_state(account["id"])["status"] == "completed"
+
+
+def test_sync_with_an_expired_login_stops_and_says_so(
+    app_module, tmp_path, monkeypatch
+):
+    import threading
+
+    monkeypatch.setattr("builtins.input", _no_input)
+    monkeypatch.setattr("src.base_platform.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        app_module.processor,
+        "process_video",
+        lambda *args, **kwargs: pytest.fail("Nothing should load."),
+    )
+    account = app_module.account_store.create_account("instagram", "alice")
+    app_module.update_sync_state(
+        account["id"], urls=["https://example.com/video/1"]
+    )
+    platform = FakeSyncPlatform(tmp_path / "urls.json", logged_in=False)
+    monkeypatch.setattr(
+        platform, "open_saved_page",
+        lambda: Platform.open_saved_page(platform, wait_seconds=0),
+    )
+
+    app_module.sync_platform(platform, account)
+
+    state = app_module.get_sync_state(account["id"])
+    assert state["status"] == "login_required"
+    assert "Instagram login for @alice has expired" in state["last_error"]
+    assert not platform.scraped
+    assert not any(
+        "-process-" in thread.name and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def _sync_with_login_setting(app_module, tmp_path, monkeypatch, enabled):
+    """Sync one known URL and return the cookie_file it was loaded with."""
+    used = []
+    monkeypatch.setattr(
+        app_module.processor,
+        "process_video",
+        lambda url, features, speed=None, cookie_file=None: (
+            used.append(cookie_file)
+        ),
+    )
+    store = app_module.account_store
+    account = store.create_account("instagram", "alice")
+    store.update_settings(account["id"], download_with_login=enabled)
+    account = store.get_account(account["id"])
+    app_module.update_sync_state(
+        account["id"], urls=["https://example.com/video/1"]
+    )
+    platform = FakeSyncPlatform(tmp_path / "urls.json", logged_in=True)
+
+    def save_cookies(path):
+        with open(path, "w") as file:
+            file.write("# Netscape HTTP Cookie File\n")
+
+    platform.save_cookies = save_cookies
+    path = store.cookies_path(account)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as file:
+        file.write("# from an earlier sync\n")
+
+    app_module.sync_platform(platform, account)
+
+    return used, path
+
+
+def test_sync_downloads_with_the_account_login_when_enabled(
+    app_module, tmp_path, monkeypatch
+):
+    used, path = _sync_with_login_setting(
+        app_module, tmp_path, monkeypatch, enabled=True
+    )
+
+    assert used == [path]
+    with open(path) as file:
+        assert file.read() == "# Netscape HTTP Cookie File\n"
+
+
+def test_sync_downloads_anonymously_and_deletes_the_login_when_disabled(
+    app_module, tmp_path, monkeypatch
+):
+    used, path = _sync_with_login_setting(
+        app_module, tmp_path, monkeypatch, enabled=False
+    )
+
+    assert used == [None]
+    assert not os.path.exists(path)
+
+
+def _fake_video(url):
+    from conftest import FakeEmbedModel
+    from src.video import Video
+
+    video = Video(url)
+    video.embedding = FakeEmbedModel().encode("dog")
+    video.stats = {}
+    return video
+
+
+def test_sync_records_what_the_run_added_and_failed(
+    app_module, tmp_path, monkeypatch
+):
+    urls = [
+        "https://www.instagram.com/reel/1/",
+        "https://www.instagram.com/reel/2/",
+        "https://www.instagram.com/reel/3/",
+    ]
+    monkeypatch.setattr(
+        app_module.processor,
+        "process_video",
+        lambda url, *args, **kwargs: None if url == urls[2] else (
+            _fake_video(url)
+        ),
+    )
+    account = app_module.account_store.create_account("instagram", "alice")
+    app_module.update_sync_state(account["id"], urls=urls)
+    platform = FakeSyncPlatform(tmp_path / "urls.json", logged_in=True)
+
+    app_module.sync_platform(platform, account)
+
+    last_run = app_module.get_sync_state(account["id"])["last_run"]
+    assert last_run["status"] == "completed"
+    assert (last_run["added"], last_run["failed"], last_run["skipped"]) == (
+        2, 1, 0
+    )
+    assert last_run["started_at"] <= last_run["finished_at"]
+    payload = app_module.sync_status_payload(account["id"])
+    assert payload["last_run"]["new_videos_url"] == (
+        f"/?added_after={int(last_run['started_at'])}"
+        f"&account={account['id']}"
+    )
+
+
+def test_a_paused_sync_records_its_last_run_as_paused(
+    app_module, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        app_module.processor,
+        "process_video",
+        lambda *args, **kwargs: pytest.fail("Nothing should load."),
+    )
+    account = app_module.account_store.create_account("instagram", "alice")
+    platform = FakeSyncPlatform(tmp_path / "urls.json", logged_in=True)
+
+    def scrape_then_pause(**kwargs):
+        app_module.update_sync_state(account["id"], status="pause_requested")
+        return set()
+
+    platform.scrape_videos = scrape_then_pause
+    # As start_sync does; without a live worker the pause request would be
+    # read as a dead sync.
+    app_module.sync_workers[account["id"]] = type(
+        "AliveWorker", (), {"is_alive": lambda self: True}
+    )()
+
+    app_module.sync_platform(platform, account)
+
+    state = app_module.get_sync_state(account["id"])
+    assert state["status"] == "paused"
+    assert state["last_run"]["status"] == "paused"
+    assert state["last_run"]["added"] == 0
+    assert app_module.sync_status_payload(account["id"])["last_run"][
+        "new_videos_url"
+    ] is None

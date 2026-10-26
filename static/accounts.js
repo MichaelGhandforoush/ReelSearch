@@ -95,6 +95,7 @@
         media: ["Leftover downloads", "Videos a stopped sync did not get to delete."],
         sync_state: ["Old sync progress", "Kept for accounts that no longer exist."],
         url_files: ["Old video lists", "Saved-video lists of accounts that no longer exist."],
+        cookie_files: ["Old saved logins", "Download logins of accounts that no longer exist."],
     };
     let busy = false;
 

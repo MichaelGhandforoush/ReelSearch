@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 
 import pytest
@@ -261,6 +262,29 @@ def test_shutdown_closes_open_browsers_without_saving(sessions):
     assert FakePlatform.instances[0].first_driver.quit_called
 
 
+def test_shutdown_during_start_still_joins_the_new_login(sessions, monkeypatch):
+    """A shutdown that lands while start() is creating the thread must wait
+    for it, not see thread None and skip the join."""
+    results = []
+    real_thread = threading.Thread
+
+    class SlowStartThread(real_thread):
+        def start(self):
+            helper = real_thread(
+                target=lambda: sessions.shutdown(timeout=2)
+            )
+            helper.start()
+            helper.join(0.3)
+            results.append(helper)
+            super().start()
+
+    monkeypatch.setattr(login_sessions.threading, "Thread", SlowStartThread)
+    session = sessions.start("instagram", "alice")
+    results[0].join(3)
+
+    assert session.status == "cancelled"
+
+
 def test_active_ids_lists_only_logins_in_progress(sessions):
     session = sessions.start("instagram", "alice")
     assert wait_until(lambda: session.status == "waiting")
@@ -270,3 +294,63 @@ def test_active_ids_lists_only_logins_in_progress(sessions):
     sessions.cancel(session.id)
     assert wait_for(session, {"cancelled"}) == "cancelled"
     assert sessions.active_ids() == set()
+
+
+def test_unexpected_error_in_the_login_loop_ends_the_session(sessions, monkeypatch):
+    def broken(session):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(sessions, "_connect", broken)
+    session = sessions.start("instagram", "alice")
+    assert wait_until(lambda: session.status == "waiting")
+    platform = FakePlatform.instances[0]
+
+    platform.logged_in = True
+
+    assert wait_for(session, {"failed"}) == "failed"
+    assert "boom" in session.error
+    assert platform.first_driver.quit_called
+    assert not os.path.exists(profile_dir(session))
+
+
+def test_failed_login_reports_a_profile_that_could_not_be_removed(
+    sessions, monkeypatch
+):
+    monkeypatch.setattr(account_store, "remove_profile", lambda account: False)
+    session = sessions.start("instagram", "alice")
+    assert wait_until(lambda: session.status == "waiting")
+    platform = FakePlatform.instances[0]
+    platform.closed = True
+
+    assert wait_for(session, {"failed"}) == "failed"
+    assert "could not be deleted" in session.error
+
+
+def test_status_poll_never_sees_an_error_before_the_status_changes(
+    sessions, monkeypatch
+):
+    session = sessions.start("instagram", "alice")
+    assert wait_until(lambda: session.status == "waiting")
+    seen = []
+
+    def poll():
+        seen.append(session.snapshot())
+
+    real_monotonic = time.monotonic
+    hooked = []
+
+    def monotonic():
+        # Called by _finish between writing the error and the status.
+        if session.error is not None and not hooked:
+            hooked.append(True)
+            thread = threading.Thread(target=poll)
+            thread.start()
+            thread.join(0.3)
+        return real_monotonic()
+
+    monkeypatch.setattr(login_sessions.time, "monotonic", monotonic)
+    FakePlatform.instances[0].closed = True
+
+    assert wait_for(session, {"failed"}) == "failed"
+    assert wait_until(lambda: seen)
+    assert seen[0]["error"] is None or seen[0]["status"] == "failed"

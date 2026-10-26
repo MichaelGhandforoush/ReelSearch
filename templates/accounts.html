@@ -35,8 +35,13 @@
                         </div>
                         <div class="account-sync-details">
                             <div class="account-sync-heading">
-                                <span>{{ account.sync.status|replace('_', ' ')|capitalize }}</span>
-                                <span>Last sync: {{ account.sync.last_sync }}</span>
+                                <span>{{ 'Login expired' if account.sync.status == 'login_required' else account.sync.status|replace('_', ' ')|capitalize }}</span>
+                                <span>
+                                    Last sync: {{ account.sync.last_sync }}{% if account.sync.last_run_summary %} · {{ account.sync.last_run_summary }}{% endif %}
+                                    {% if account.sync.last_run and account.sync.last_run.new_videos_url %}
+                                        · <a href="{{ account.sync.last_run.new_videos_url }}">Show new videos</a>
+                                    {% endif %}
+                                </span>
                             </div>
                             <div class="account-sync-stats">
                                 <span>{{ account.sync.source_total }} URLs</span>
@@ -84,6 +89,13 @@
                                                 Skip the backlog
                                             </label>
                                             <p class="account-setting-note">Videos found by earlier syncs that have not loaded yet are ignored, so syncs only load the videos they newly find. Turn it off to load them again from the next sync.</p>
+                                        </div>
+                                        <div class="account-setting">
+                                            <label>
+                                                <input type="checkbox" name="download_with_login" value="1" data-autosubmit {% if account.settings.download_with_login %}checked{% endif %}>
+                                                Download with this account’s login
+                                            </label>
+                                            <p class="account-setting-note">Fewer videos fail as private or rate limited, but any rate limit or security check lands on your account instead of this computer. Syncs save the login to a file in the app folder, which is deleted when this is turned off or the account is removed.</p>
                                         </div>
                                         <fieldset class="account-setting">
                                             <legend>Loading speed</legend>

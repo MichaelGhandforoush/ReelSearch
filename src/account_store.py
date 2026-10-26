@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import threading
 import time
 import uuid
 
@@ -8,6 +9,10 @@ import uuid
 ROOT = os.path.dirname(os.path.dirname(__file__))
 ACCOUNTS_PATH = os.path.join(ROOT, "accounts.json")
 PROFILES_ROOT = os.path.join(ROOT, "selenium_profiles")
+
+# Held around every read-modify-write of accounts.json. Re-entrant because
+# the public functions call each other (list_accounts -> ensure_migrated).
+_lock = threading.RLock()
 
 
 def _read():
@@ -22,8 +27,14 @@ def _read():
 
 
 def _write(accounts):
-    with open(ACCOUNTS_PATH, "w", encoding="utf-8") as file:
-        json.dump(accounts, file, indent=2)
+    temp_path = f"{ACCOUNTS_PATH}.{threading.get_ident()}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as file:
+            json.dump(accounts, file, indent=2)
+        os.replace(temp_path, ACCOUNTS_PATH)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 def _legacy_username(platform):
@@ -41,6 +52,11 @@ def remove_legacy_username(platform):
 
 
 def ensure_migrated():
+    with _lock:
+        return _ensure_migrated()
+
+
+def _ensure_migrated():
     accounts = _read()
     changed = False
     for platform in ("instagram", "tiktok"):
@@ -94,15 +110,22 @@ def find_account(platform, username):
 def create_account(platform, username, account_id=None):
     platform = platform.lower().strip()
     username = username.strip()
-    accounts = list_accounts()
-    account = {
-        "id": account_id or uuid.uuid4().hex,
-        "platform": platform,
-        "username": username,
-    }
-    accounts.append(account)
-    _write(accounts)
-    return account
+    with _lock:
+        accounts = list_accounts()
+        if any(
+            item["platform"] == platform
+            and item["username"].lower() == username.lower()
+            for item in accounts
+        ):
+            raise ValueError(f"@{username} is already connected on {platform}.")
+        account = {
+            "id": account_id or uuid.uuid4().hex,
+            "platform": platform,
+            "username": username,
+        }
+        accounts.append(account)
+        _write(accounts)
+        return account
 
 
 # Per-account preferences and their defaults. Accounts saved before a
@@ -117,6 +140,9 @@ SETTING_DEFAULTS = {
     # Set aside videos earlier syncs found but never loaded, so syncs only
     # load the videos they find themselves.
     "skip_backlog": False,
+    # Download with the browser's login instead of anonymously. Fewer videos
+    # fail as private or rate limited, but limits land on the account.
+    "download_with_login": False,
     # What goes into a video's searchable text, as src.processor FEATURES.
     # Applies to videos processed after the change.
     "use_transcript": True,
@@ -128,6 +154,7 @@ SETTING_CHOICES = {
     "sync_mode": ("all", "new"),
     "load_speed": ("slow", "medium", "fast"),
     "skip_backlog": (True, False),
+    "download_with_login": (True, False),
     "use_transcript": (True, False),
     "use_ocr": (True, False),
     "use_comments": (True, False),
@@ -148,24 +175,26 @@ def update_settings(account_id, **changes):
     for name, value in changes.items():
         if name not in SETTING_CHOICES or value not in SETTING_CHOICES[name]:
             raise ValueError(f"Invalid value for {name}: {value!r}")
-    accounts = list_accounts()
-    account = next(
-        (item for item in accounts if item["id"] == account_id), None
-    )
-    if account is None:
-        raise ValueError("Account not found.")
-    account["settings"] = {**account_settings(account), **changes}
-    _write(accounts)
-    return account["settings"]
+    with _lock:
+        accounts = list_accounts()
+        account = next(
+            (item for item in accounts if item["id"] == account_id), None
+        )
+        if account is None:
+            raise ValueError("Account not found.")
+        account["settings"] = {**account_settings(account), **changes}
+        _write(accounts)
+        return account["settings"]
 
 
 def delete_account(account_id):
-    accounts = list_accounts()
-    account = get_account(account_id)
-    if account is None:
-        return None
-    _write([item for item in accounts if item["id"] != account_id])
-    return account
+    with _lock:
+        accounts = list_accounts()
+        account = get_account(account_id)
+        if account is None:
+            return None
+        _write([item for item in accounts if item["id"] != account_id])
+        return account
 
 
 def profile_path(account):
@@ -203,6 +232,17 @@ def remove_folder(path):
             return True
         time.sleep(0.5)
     return not os.path.exists(path)
+
+
+def cookies_path(account):
+    """The cookies.txt a sync writes so downloads use the account's login."""
+    return os.path.join(ROOT, "cookies", f"{account['id']}.txt")
+
+
+def remove_cookies(account):
+    path = cookies_path(account)
+    if os.path.exists(path):
+        os.remove(path)
 
 
 def urls_path(account):

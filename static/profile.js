@@ -697,12 +697,15 @@
         return input ? input.closest("label").textContent.trim() : "";
     }
 
-    const SORT_DATA_KEYS = { newest: "uploadedAt", likes: "likes" };
+    const SORT_DATA_KEYS = {
+        newest: "uploadedAt", likes: "likes", added: "addedAt"
+    };
     // Keep in sync with order_labels in profile.html.
     const ORDER_LABELS = {
         "": ["Default order", "Reversed order"],
         newest: ["Newest first", "Oldest first"],
-        likes: ["Most liked first", "Least liked first"]
+        likes: ["Most liked first", "Least liked first"],
+        added: ["Recently saved first", "Earliest saved first"]
     };
     const reverseButton = document.querySelector("#reverse-sort");
 
@@ -816,6 +819,25 @@
 
     fitSimilarChip();
     window.addEventListener("resize", fitSimilarChip);
+
+    const addedFilter = document.querySelector("#added-filter");
+    const addedFilterLabel = document.querySelector("#added-filter-label");
+    const addedClear = document.querySelector("#added-clear");
+    // A unix time, set by "Show new videos": only videos added since then.
+    let addedAfter = addedFilter ? addedFilter.dataset.addedAfter || "" : "";
+
+    function setAddedAfter(value) {
+        if (value === addedAfter) return;
+        addedAfter = value;
+        if (!addedFilter) return;
+        addedFilter.hidden = !value;
+        addedFilter.dataset.addedAfter = value;
+        addedFilterLabel.textContent = value
+            ? `Added since ${new Date(Number(value) * 1000).toLocaleString(
+                [], { dateStyle: "medium", timeStyle: "short" }
+            )}`
+            : "";
+    }
 
     // ---- Accounts & platforms ----
 
@@ -984,6 +1006,7 @@
             if (value) params.set(group.dataset.filter, value);
         });
         if (isReversed()) params.set("reverse", "1");
+        if (addedAfter) params.set("added_after", addedAfter);
         return params;
     }
 
@@ -1005,6 +1028,7 @@
         if (params.get("reverse") === "1") {
             parts.push((ORDER_LABELS[params.get("sort") || ""] || ORDER_LABELS[""])[1]);
         }
+        if (params.get("added_after")) parts.push("New since a sync");
         return parts.join(" · ");
     }
 
@@ -1188,6 +1212,7 @@
                 setFilterValue(group, params.get(group.dataset.filter) || "");
             });
             setReversed(params.get("reverse") === "1");
+            setAddedAfter(params.get("added_after") || "");
             applySourceParams(params);
             settingsChanged(true);
         }
@@ -1219,6 +1244,13 @@
             recordRecentSearch();
             searchForm.scrollIntoView({ block: "start", behavior: "smooth" });
         };
+
+        if (addedClear) {
+            addedClear.addEventListener("click", () => {
+                setAddedAfter("");
+                settingsChanged(true);
+            });
+        }
 
         if (similarClear) {
             similarClear.addEventListener("click", () => {
@@ -1286,6 +1318,7 @@
             clearFiltersButton.addEventListener("click", () => {
                 filterGroups.forEach((group) => setFilterValue(group, ""));
                 setReversed(false);
+                setAddedAfter("");
                 setAllSources(true);
                 if (sourceWarning) sourceWarning.hidden = true;
                 settingsChanged(true);
@@ -1677,9 +1710,23 @@
             } else if (data.status === "error") {
                 stateElement.textContent =
                     data.last_error || `${data.remaining} left to load`;
+            } else if (data.status === "login_required") {
+                stateElement.textContent = "Login expired · ";
+                const link = document.createElement("a");
+                link.href = control.dataset.loginUrl;
+                link.textContent = "Log in again";
+                if (data.last_error) link.title = data.last_error;
+                stateElement.append(link);
             } else {
                 stateElement.textContent =
                     data.source_total > 0 ? `${progressText}` : "";
+            }
+            const newVideosUrl = data.last_run && data.last_run.new_videos_url;
+            if (!isActive && data.status !== "login_required" && newVideosUrl) {
+                const link = document.createElement("a");
+                link.href = newVideosUrl;
+                link.textContent = `Show ${data.last_run.added} new`;
+                stateElement.append(stateElement.textContent ? " · " : "", link);
             }
         }
         setLibraryTotal(data.total_videos);

@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 
 from conftest import FakeEmbedModel
 from src.video import Video
@@ -185,6 +186,12 @@ def test_removing_an_account_removes_its_login_and_url_list(
     urls_path = store.urls_path(account)
     with open(urls_path, "w") as file:
         json.dump(["https://www.instagram.com/reel/1/"], file)
+    cookies_path = store.cookies_path(account)
+    other_cookies = store.cookies_path(other)
+    os.makedirs(os.path.dirname(cookies_path))
+    for path in (cookies_path, other_cookies):
+        with open(path, "w") as file:
+            file.write("# Netscape HTTP Cookie File\n")
     add_owned_video(
         app_module, "https://www.instagram.com/reel/1/", "dog", account["id"]
     )
@@ -194,10 +201,37 @@ def test_removing_an_account_removes_its_login_and_url_list(
     assert response.status_code == 302
     assert not os.path.exists(profile)
     assert not os.path.exists(urls_path)
+    assert not os.path.exists(cookies_path)
+    assert os.path.exists(other_cookies)
     assert os.path.isdir(other_profile)
     assert [item["id"] for item in store.list_accounts()] == [other["id"]]
     assert app_module.collection.count() == 0
     assert profile.startswith(str(tmp_path))
+
+
+def test_turning_off_download_with_login_deletes_the_saved_login(
+    app_module, client,
+):
+    store = app_module.account_store
+    account = store.create_account("instagram", "alice")
+    headers = {"X-Requested-With": "XMLHttpRequest"}
+
+    response = client.post(
+        f"/accounts/{account['id']}/settings",
+        data={"download_with_login": "1"}, headers=headers,
+    )
+    assert response.get_json()["download_with_login"] is True
+    cookies_path = store.cookies_path(account)
+    os.makedirs(os.path.dirname(cookies_path))
+    with open(cookies_path, "w") as file:
+        file.write("# Netscape HTTP Cookie File\n")
+
+    response = client.post(
+        f"/accounts/{account['id']}/settings", data={}, headers=headers,
+    )
+
+    assert response.get_json()["download_with_login"] is False
+    assert not os.path.exists(cookies_path)
 
 
 def test_storage_report_route_lists_counts_not_paths(
@@ -278,3 +312,168 @@ def test_storage_cleanup_refuses_while_a_sync_or_login_runs(
 
     assert response.status_code == 409
     assert orphan.is_dir()
+
+
+def test_sync_cannot_start_while_its_account_is_being_removed(
+    app_module, client, monkeypatch,
+):
+    account = app_module.account_store.create_account("instagram", "alice")
+    monkeypatch.setattr(app_module, "create_platform", lambda account_id: None)
+    monkeypatch.setattr(app_module, "sync_platform", lambda *args: None)
+    outcome = {}
+
+    class RacingWorker:
+        alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout=None):
+            # A sync request arrives while logout waits for the worker.
+            self.alive = False
+            try:
+                outcome["action"] = app_module.start_sync(account["id"])
+            except ValueError as error:
+                outcome["error"] = str(error)
+
+    monkeypatch.setitem(
+        app_module.sync_workers, account["id"], RacingWorker()
+    )
+
+    response = client.post("/logout", data={"account_id": account["id"]})
+
+    assert response.status_code == 302
+    assert "action" not in outcome
+    assert "removed" in outcome["error"]
+    # Once the removal is over the id is free again.
+    assert account["id"] not in app_module.removing_accounts
+
+
+def test_sync_cannot_start_while_storage_cleanup_deletes_files(
+    app_module, client, monkeypatch,
+):
+    account = app_module.account_store.create_account("instagram", "alice")
+    monkeypatch.setattr(app_module, "create_platform", lambda account_id: None)
+    monkeypatch.setattr(app_module, "sync_platform", lambda *args: None)
+    started_during = []
+
+    def cleanup_with_a_sync_request(report, categories, clear_sync_state):
+        # A sync request arrives while the cleanup is deleting files.
+        request = threading.Thread(
+            target=lambda: app_module.start_sync(account["id"])
+        )
+        request.start()
+        request.join(0.5)
+        started_during.append(not request.is_alive())
+        return {"removed": {}, "failed": []}
+
+    monkeypatch.setattr(
+        app_module, "storage_cleanup", cleanup_with_a_sync_request
+    )
+
+    response = client.post("/storage/cleanup", data={"category": "profiles"})
+
+    assert response.status_code == 200
+    assert started_during == [False]
+
+
+def test_shutdown_closes_logins_while_syncs_are_stopping(
+    app_module, client, monkeypatch,
+):
+    """Login browsers close in parallel with the sync wait, not after it."""
+    logins_closing = threading.Event()
+    seen = {}
+
+    def slow_stop_syncs():
+        seen["logins_closed_during_sync_wait"] = logins_closing.wait(2)
+        return {"paused": 0, "forced": 0}
+
+    monkeypatch.setattr(app_module, "stop_syncs", slow_stop_syncs)
+    monkeypatch.setattr(
+        app_module.login_sessions, "shutdown",
+        lambda *args, **kwargs: logins_closing.set(),
+    )
+    monkeypatch.setattr(
+        app_module.threading, "Timer",
+        lambda *args, **kwargs: type("T", (), {"start": lambda self: None})(),
+    )
+
+    response = client.post("/shutdown")
+
+    assert response.status_code == 200
+    assert seen["logins_closed_during_sync_wait"] is True
+
+
+def add_video_added_at(app_module, url, word, added_at, account_id=None):
+    add_owned_video(app_module, url, word, account_id)
+    app_module.collection._merge_metadata({url: {"added_at": added_at}})
+
+
+def test_videos_filter_by_added_after_and_sort_by_added(app_module, client):
+    add_video_added_at(app_module, "https://www.instagram.com/reel/1/",
+                       "dog", 1000.0)
+    add_video_added_at(app_module, "https://www.instagram.com/reel/2/",
+                       "dog", 3000.0)
+    add_video_added_at(app_module, "https://www.instagram.com/reel/3/",
+                       "dog", 2000.0)
+    # Saved before added_at was recorded: never counts as new.
+    app_module.collection.collection.add(
+        ids=["https://www.instagram.com/reel/4/"],
+        embeddings=[[0.0, 1.0, 0.0]], documents=["old"],
+        metadatas=[{"platform": "instagram"}],
+    )
+
+    new = client.get("/videos?added_after=2000&limit=10", headers=XHR)
+    everything = client.get("/videos?sort=added&limit=10", headers=XHR)
+    ignored = client.get("/videos?added_after=soon&limit=10", headers=XHR)
+
+    assert sorted(card_urls(new.get_data(as_text=True))) == [
+        "https://www.instagram.com/reel/2/",
+        "https://www.instagram.com/reel/3/",
+    ]
+    assert card_urls(everything.get_data(as_text=True)) == [
+        "https://www.instagram.com/reel/2/",
+        "https://www.instagram.com/reel/3/",
+        "https://www.instagram.com/reel/1/",
+        "https://www.instagram.com/reel/4/",
+    ]
+    assert len(card_urls(ignored.get_data(as_text=True))) == 4
+
+
+def test_home_shows_the_added_after_chip(app_module, client):
+    response = client.get("/?added_after=1700000000")
+
+    html = response.get_data(as_text=True)
+    assert 'data-added-after="1700000000"' in html
+    assert "Added since" in html
+
+
+def test_last_sync_is_when_the_last_run_finished_not_updated_at(
+    app_module, monkeypatch,
+):
+    from datetime import datetime
+
+    finished = datetime(2024, 3, 5, 14, 2).timestamp()
+    app_module.update_sync_state("acc", last_run={
+        "started_at": finished - 60, "finished_at": finished,
+        "status": "completed", "added": 12, "failed": 3, "skipped": 0,
+    })
+    # A later state write, like the auto-pause of a dead worker.
+    app_module.update_sync_state("acc", current_url=None)
+
+    data = app_module.sync_display_data("acc")
+
+    assert data["last_sync"] == "05 Mar 2024, 14:02"
+    assert data["last_run_summary"] == "12 new videos, 3 couldn't load"
+    assert data["last_run"]["new_videos_url"] == (
+        f"/?added_after={int(finished - 60)}&account=acc"
+    )
+
+
+def test_last_sync_is_never_without_a_finished_run(app_module):
+    app_module.update_sync_state("acc", status="paused")
+
+    data = app_module.sync_display_data("acc")
+
+    assert data["last_sync"] == "Never"
+    assert data["last_run"] is None

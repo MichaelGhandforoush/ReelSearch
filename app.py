@@ -12,6 +12,7 @@ from src.processor import (
     download_workers_for,
     explain_error,
 )
+from src.base_platform import LoginRequired
 from src.instagram import Instagram
 from src.instagram_embed import render_embed, warm as warm_instagram
 from src.login_sessions import LoginError, LoginSessions
@@ -77,6 +78,7 @@ sync_state_path = os.path.join(os.path.dirname(__file__), "sync_state.json")
 sync_lock = threading.RLock()
 sync_workers = {}
 sync_platforms = {}
+removing_accounts = set()
 shutting_down = threading.Event()
 SHUTDOWN_WAIT_SECONDS = 15
 ACTIVE_SYNC_STATUSES = {
@@ -98,8 +100,12 @@ SEARCH_MAX_PAGE_SIZE = 30
 # about two rows of the grid beyond what the page is about to load.
 WARM_AHEAD = 9
 UPLOAD_WINDOWS = {"week": 7, "month": 30, "year": 365}
-SORT_FIELDS = {"newest": "uploaded_at", "likes": "likes"}
-SEARCH_FILTER_NAMES = ("platform", "account", "uploaded", "sort", "reverse")
+SORT_FIELDS = {
+    "newest": "uploaded_at", "likes": "likes", "added": "added_at",
+}
+SEARCH_FILTER_NAMES = (
+    "platform", "account", "uploaded", "sort", "reverse", "added_after",
+)
 # Sources: a video matches if its whole platform or its account is selected.
 MULTI_VALUE_FILTERS = ("platform", "account")
 PLATFORM_LABELS = {"instagram": "Instagram", "tiktok": "TikTok"}
@@ -188,6 +194,8 @@ def _empty_sync_state():
         "ignored_urls": [],
         "current_url": None,
         "last_error": None,
+        # What the most recent finished run did (see sync_platform).
+        "last_run": None,
         "updated_at": None,
     }
 
@@ -342,17 +350,64 @@ def sync_status_payload(platform_name):
         "ignored": ignored,
         "remaining": max(total - loaded - skipped - ignored, 0),
         "total_videos": collection_count,
+        "last_run": last_run_data(platform_name, state.get("last_run")),
     }
+
+
+def last_run_data(account_id, last_run):
+    """The saved last_run, with a link to the videos it added, or None."""
+    if not isinstance(last_run, dict):
+        return None
+    started_at = last_run.get("started_at")
+    added = last_run.get("added") or 0
+    return {
+        **last_run,
+        "new_videos_url": "/?" + urlencode({
+            "added_after": int(started_at), "account": account_id,
+        }) if added and isinstance(started_at, (int, float)) else None,
+    }
+
+
+def format_sync_time(timestamp):
+    moment = datetime.fromtimestamp(timestamp)
+    days_ago = (datetime.now().date() - moment.date()).days
+    if days_ago == 0:
+        return f"today {moment:%H:%M}"
+    if days_ago == 1:
+        return f"yesterday {moment:%H:%M}"
+    return moment.strftime("%d %b %Y, %H:%M")
+
+
+def last_run_summary(last_run):
+    """Like "12 new videos, 3 couldn't load"."""
+    added = last_run.get("added") or 0
+    parts = [f"{added} new video{'' if added == 1 else 's'}"]
+    if last_run.get("failed"):
+        parts.append(f"{last_run['failed']} couldn't load")
+    return ", ".join(parts)
+
+
+def added_after_label(added_after):
+    """Names the "Show new videos" filter, like "Added since today 14:02"."""
+    if not added_after:
+        return None
+    try:
+        return f"Added since {format_sync_time(int(added_after))}"
+    except (OverflowError, OSError, ValueError):
+        # Times Windows can't convert, such as ones near 1970.
+        return "Added since a sync"
 
 
 def sync_display_data(account_id):
     payload = sync_status_payload(account_id)
-    updated_at = get_sync_state(account_id).get("updated_at")
-    payload["last_sync"] = (
-        datetime.fromtimestamp(updated_at).strftime("%d %b %Y, %H:%M")
-        if isinstance(updated_at, (int, float))
-        else "Never"
-    )
+    last_run = payload["last_run"]
+    finished_at = (last_run or {}).get("finished_at")
+    if isinstance(finished_at, (int, float)):
+        payload["last_sync"] = format_sync_time(finished_at)
+        payload["last_run_summary"] = last_run_summary(last_run)
+    else:
+        payload["last_sync"] = "Never"
+        payload["last_run_summary"] = None
     return payload
 
 
@@ -387,6 +442,19 @@ def sync_platform(platform, account):
     state_key = account["id"]
     settings = account_store.account_settings(account)
     features = {name: settings[name] for name in FEATURES}
+    # What this run did, saved as last_run when it ends. Kept here, not in a
+    # global, since several accounts can sync at once.
+    run = {"started_at": time.time(), "added": 0, "failed": 0, "skipped": 0}
+
+    def finish(status, **changes):
+        update_sync_state(
+            state_key,
+            status=status,
+            current_url=None,
+            last_run={**run, "finished_at": time.time(), "status": status},
+            **changes,
+        )
+
     update_sync_state(
         state_key,
         status="collecting_urls",
@@ -400,6 +468,8 @@ def sync_platform(platform, account):
     processing_errors = []
     loaded = set()
     in_flight = []
+    # Set once the page is open, if downloads should use the account's login.
+    cookie_file = None
 
     def enqueue(url):
         if url not in queued:
@@ -432,11 +502,13 @@ def sync_platform(platform, account):
                     update_sync_state(state_key, current_url=in_flight[0])
                 try:
                     video = processor.process_video(
-                        url, features, speed=settings["load_speed"]
+                        url, features, speed=settings["load_speed"],
+                        cookie_file=cookie_file,
                     )
                     with sync_lock:
                         state = get_sync_state(state_key)
                         if video is None and url in processor.unloadable_urls:
+                            run["skipped"] += 1
                             loaded.add(url)
                             update_sync_state(
                                 state_key,
@@ -445,6 +517,7 @@ def sync_platform(platform, account):
                                 )),
                             )
                         elif video is None:
+                            run["failed"] += 1
                             print(
                                 f"Not added to the library: {url} (see the "
                                 "message above for why). It will be tried "
@@ -456,11 +529,12 @@ def sync_platform(platform, account):
                                 "before it finished."
                             )
                         else:
-                            collection.add(
+                            if collection.add(
                                 video,
                                 account_id=account["id"],
                                 platform=account["platform"],
-                            )
+                            ):
+                                run["added"] += 1
                             loaded.add(url)
                             update_sync_state(
                                 state_key,
@@ -505,6 +579,31 @@ def sync_platform(platform, account):
         # URLs from earlier runs that were never processed go first.
         for url in get_sync_state(state_key)["urls"]:
             enqueue(url)
+
+        # Nothing loads until the login is known to work. Any other problem
+        # opening the page is raised below, after the videos already found
+        # have loaded.
+        page_error = None
+        try:
+            platform.open_saved_page()
+        except LoginRequired:
+            raise
+        except Exception as error:
+            page_error = error
+        if not settings["download_with_login"]:
+            # Not left on disk once the setting is off: it is a live login.
+            account_store.remove_cookies(account)
+        elif page_error is None:
+            path = account_store.cookies_path(account)
+            try:
+                platform.save_cookies(path)
+                cookie_file = path
+            except Exception as error:
+                print(
+                    f"Could not save the {account['platform']} login of "
+                    f"{account['username']} for downloads, so videos load "
+                    f"without it: {explain_error(error)}"
+                )
         for worker in processing_workers:
             worker.start()
 
@@ -516,7 +615,8 @@ def sync_platform(platform, account):
             enqueue(url)
 
         try:
-            platform.log_in()
+            if page_error is not None:
+                raise page_error
             scraped_urls = platform.scrape_videos(
                 on_url_found=record_url,
                 should_stop=stop_requested,
@@ -558,9 +658,7 @@ def sync_platform(platform, account):
                 "pause_requested": "paused",
                 "cancel_requested": "cancelled",
             }.get(status, "completed")
-            update_sync_state(
-                state_key, status=final_status, current_url=None
-            )
+            finish(final_status)
     except Exception as error:
         abort.set()
         deadline = time.monotonic() + 5
@@ -569,7 +667,18 @@ def sync_platform(platform, account):
                 worker.join(timeout=max(deadline - time.monotonic(), 0))
         if shutting_down.is_set():
             # The browser was closed by the app shutting down, not a failure.
-            update_sync_state(state_key, status="paused", current_url=None)
+            finish("paused")
+            return
+        if isinstance(error, LoginRequired):
+            label = PLATFORM_LABELS.get(
+                account["platform"], account["platform"].capitalize()
+            )
+            message = (
+                f"Your {label} login for @{account['username']} has "
+                "expired. Log in again to sync this account."
+            )
+            print(message)
+            finish("login_required", last_error=message)
             return
         reason = explain_error(error)
         message = (
@@ -578,9 +687,7 @@ def sync_platform(platform, account):
             "Progress so far is saved; start the sync again to resume."
         )
         print(message)
-        update_sync_state(
-            state_key, status="error", current_url=None, last_error=message
-        )
+        finish("error", last_error=message)
     finally:
         _close_browser(platform)
         with sync_lock:
@@ -593,6 +700,8 @@ def start_sync(account_id):
         account = account_store.get_account(account_id)
         if account is None:
             raise ValueError("Account not found.")
+        if account_id in removing_accounts:
+            raise ValueError("That account is being removed.")
         worker = sync_workers.get(account_id)
         if worker and worker.is_alive():
             update_sync_state(account_id, status="pause_requested")
@@ -660,7 +769,7 @@ def search_facets(metadatas, accounts):
         ],
         **{
             field: any(field in metadata for metadata in metadatas)
-            for field in ("uploaded_at", "likes")
+            for field in ("uploaded_at", "likes", "added_at")
         },
         "missing_details": sum(
             1 for metadata in metadatas if not metadata.get("details_checked")
@@ -697,11 +806,11 @@ def render_profile(
         video_meta={**dict(shown), **(search_meta or {})},
         total_videos=collection.count(),
         library_matching=len(library),
-        last_sync="10",
         search_results=search_results,
         query=query,
         similar=similar if label else "",
         similar_label=label,
+        added_after_label=added_after_label(filters["added_after"]),
         has_more=has_more,
         has_weak=has_weak,
         filters=filters,
@@ -875,8 +984,12 @@ def account_settings_route(account_id):
         sync_mode="new" if request.form.get("new_only") else "all",
         load_speed=request.form.get("load_speed", "medium"),
         skip_backlog=bool(request.form.get("skip_backlog")),
+        download_with_login=bool(request.form.get("download_with_login")),
         **{name: bool(request.form.get(name)) for name in FEATURES},
     )
+    if not settings["download_with_login"]:
+        # Downloads already running go back to loading without a login.
+        account_store.remove_cookies(account)
     # Applied straight away, so a running sync drops the backlog too.
     if settings["skip_backlog"] and not skipped_before:
         set_backlog_aside(account_id)
@@ -925,6 +1038,11 @@ def read_search_filters(values):
                 value for value in dict.fromkeys(values.getlist(name))
                 if value in allowed[name]
             ]
+        elif name == "added_after":
+            # A unix time: videos added to the library since then.
+            value = (values.get(name) or "").strip()
+            valid = value.isascii() and value.isdigit() and len(value) <= 10
+            filters[name] = value if valid else ""
         else:
             value = (values.get(name) or "").strip()
             filters[name] = value if value in allowed[name] else ""
@@ -945,6 +1063,8 @@ def search_where(filters):
     days = UPLOAD_WINDOWS.get(filters["uploaded"])
     if days:
         clauses.append({"uploaded_at": {"$gte": time.time() - days * 86400}})
+    if filters["added_after"]:
+        clauses.append({"added_at": {"$gte": int(filters["added_after"])}})
     if not clauses:
         return None
     return clauses[0] if len(clauses) == 1 else {"$and": clauses}
@@ -1279,6 +1399,18 @@ def logout_route():
             error="Choose a valid connected account.",
         ), 400
 
+    # Blocks start_sync for this account until the removal finishes.
+    with sync_lock:
+        removing_accounts.add(account_id)
+    try:
+        return remove_account(account)
+    finally:
+        with sync_lock:
+            removing_accounts.discard(account_id)
+
+
+def remove_account(account):
+    account_id = account["id"]
     worker = sync_workers.get(account_id)
     if worker and worker.is_alive():
         update_sync_state(account_id, status="cancel_requested")
@@ -1303,6 +1435,7 @@ def logout_route():
         )
     if os.path.exists(urls_path):
         os.remove(urls_path)
+    account_store.remove_cookies(account)
     clear_sync_state(account_id)
     account_store.delete_account(account_id)
     if account.get("legacy"):
@@ -1373,7 +1506,8 @@ def storage_cleanup_route():
                     )
                 }), 409
             report = storage_report(**storage_args())
-        result = storage_cleanup(report, categories, clear_sync_state)
+            # Held through the deletes so start_sync waits for them.
+            result = storage_cleanup(report, categories, clear_sync_state)
     finally:
         storage_lock.release()
     return jsonify({**result, "storage": storage_payload()})
@@ -1421,8 +1555,11 @@ def stop_syncs(timeout=SHUTDOWN_WAIT_SECONDS):
 
 @app.route("/shutdown", methods=["POST"])
 def shutdown_route():
+    # Logins close alongside the syncs so the waits do not add up.
+    logins = threading.Thread(target=login_sessions.shutdown, daemon=True)
+    logins.start()
     summary = stop_syncs()
-    login_sessions.shutdown()
+    logins.join()
     # Stop the server the same way Ctrl+C does, after this response is sent.
     threading.Timer(0.5, _thread.interrupt_main).start()
     return render_template("stopped.html", **summary)

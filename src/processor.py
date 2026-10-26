@@ -45,8 +45,8 @@ COMMENT_SPAM_PATTERN = re.compile(
 
 ERROR_REASONS = (
     (("private", "login required", "log in", "sign in", "cookies"),
-     "the video is private or needs a login; check your cookies file and "
-     "that the account is signed in"),
+     "the video is private or needs a login; try turning on \"Download "
+     "with this account's login\" in the account's settings"),
     (("unavailable", "removed", "deleted", "not found", "404",
       "does not exist"),
      "the video was removed or is no longer available"),
@@ -300,10 +300,6 @@ class Processor:
                 "to its executable path."
             )
 
-        self.cookie_files = {
-            "tiktok": "/content/www.tiktok.com_cookies.txt",
-            "instagram": "/content/www.instagram.com_cookies.txt",
-        }
         self.download_options = {
             "outtmpl": f"{output_dir}/%(id)s.%(ext)s",
             "format": "mp4",
@@ -322,27 +318,38 @@ class Processor:
         # URLs that failed in a way retrying cannot fix (no video in them).
         self.unloadable_urls = set()
 
-    def _ydl(self, url, details=False, comments=None):
+    def _ydl(self, url, details=False, comments=None, cookie_file=None):
+        """cookie_file: a Netscape cookies.txt to download with a login.
+        Without one, REELSEARCH_COOKIES_<PLATFORM> is used if set."""
         platform = "tiktok" if "tiktok" in url else "instagram"
         comments = self.use_comments if comments is None else comments
+        cookie_file = cookie_file or os.getenv(
+            f"REELSEARCH_COOKIES_{platform.upper()}"
+        )
+        # Cookies are optional: public videos download without them.
+        if cookie_file and not os.path.isfile(cookie_file):
+            cookie_file = None
+        # yt-dlp reads the file once, so a client is rebuilt when a later
+        # sync rewrites it.
+        written = os.path.getmtime(cookie_file) if cookie_file else None
         clients = getattr(self._local, "ydl_clients", None)
         if clients is None:
             clients = self._local.ydl_clients = {}
-        key = (platform, details, not details and comments)
-        if key not in clients:
+        key = (platform, details, not details and comments, cookie_file)
+        if key not in clients or clients[key][0] != written:
             options = (
                 self.details_options if details
                 else {**self.download_options, "getcomments": comments}
             )
             options = {**options, "logger": QuietLogger()}
-            # Cookies are optional: public videos download without them.
-            cookie_file = self.cookie_files[platform]
-            if os.path.isfile(cookie_file):
+            if cookie_file:
                 options["cookiefile"] = cookie_file
-            clients[key] = yt_dlp.YoutubeDL(options)
-        return clients[key]
+            clients[key] = (written, yt_dlp.YoutubeDL(options))
+        return clients[key][1]
 
-    def _extract(self, url, details=False, comments=None, speed=None):
+    def _extract(
+        self, url, details=False, comments=None, speed=None, cookie_file=None
+    ):
         """Run yt-dlp for a URL, retrying network failures with backoff.
 
         Each attempt holds one of the platform's download slots, and a
@@ -353,7 +360,9 @@ class Processor:
         """
         speed = speed if speed in LOAD_SPEEDS else DEFAULT_LOAD_SPEED
         limit = self.download_limits[(self.get_platform(url), speed)]
-        ydl = self._ydl(url, details=details, comments=comments)
+        ydl = self._ydl(
+            url, details=details, comments=comments, cookie_file=cookie_file
+        )
         for attempt in range(1, self.download_attempts + 1):
             try:
                 with limit:
@@ -381,11 +390,17 @@ class Processor:
                 limit.succeeded()
                 return info
 
-    def download(self, url, output_dir="videos", comments=None, speed=None):
+    def download(
+        self, url, output_dir="videos", comments=None, speed=None,
+        cookie_file=None,
+    ):
         """comments: fetch the video's comments too (default use_comments).
-        speed: one of LOAD_SPEEDS (default medium)."""
+        speed: one of LOAD_SPEEDS (default medium).
+        cookie_file: cookies.txt of the account to download as, if any."""
         try:
-            info = self._extract(url, comments=comments, speed=speed)
+            info = self._extract(
+                url, comments=comments, speed=speed, cookie_file=cookie_file
+            )
             entry = self._first_entry(info)
             return (
                 self._downloaded_path(entry, output_dir),
@@ -737,19 +752,21 @@ class Processor:
             )
         return " ".join(part for part in parts if part).strip()
 
-    def process_video(self, url, features=None, speed=None):
+    def process_video(self, url, features=None, speed=None, cookie_file=None):
         """Download a video and build its searchable text and embedding.
 
         features: overrides for the optional steps in FEATURES, such as
             {"use_comments": False}; others use this processor's settings.
         speed: how aggressively to download, one of LOAD_SPEEDS.
+        cookie_file: download logged in with this cookies.txt.
         """
         features = self.features(features)
         video = Video(url)
         step = "download"
         try:
             result = self.download(
-                video.url, comments=features["use_comments"], speed=speed
+                video.url, comments=features["use_comments"], speed=speed,
+                cookie_file=cookie_file,
             )
             if result is None:
                 # download() already printed why it was skipped.

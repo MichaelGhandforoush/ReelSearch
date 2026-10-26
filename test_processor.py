@@ -422,7 +422,9 @@ def test_process_video(monkeypatch, processor):
     assert fake_video.embedding == [0.1, 0.2, 0.3]
     assert fake_video.stats == {"likes": 5}
 
-    processor.download.assert_called_once_with(fake_video.url, comments=True, speed=None)
+    processor.download.assert_called_once_with(
+        fake_video.url, comments=True, speed=None, cookie_file=None
+    )
     processor.transcribe.assert_called_once_with("videos/123.mp4")
     processor.extract_keyframes.assert_called_once_with("videos/123.mp4")
     processor.extract_text_from_frames.assert_called_once()
@@ -583,7 +585,8 @@ def test_process_video_features_override_for_one_call(processor):
     assert video.description == "OCR text"
     processor.transcribe.assert_not_called()
     processor.download.assert_called_once_with(
-        "https://www.tiktok.com/@u/video/1", comments=False, speed=None
+        "https://www.tiktok.com/@u/video/1", comments=False, speed=None,
+        cookie_file=None,
     )
     # The override does not change the processor's own settings.
     assert processor.use_transcript and processor.use_comments
@@ -694,3 +697,89 @@ def test_downloads_write_no_info_json_but_still_return_comments_and_stats(
     assert made[0]["writeinfojson"] is False
     assert result[3] == [{"text": "great recipe", "author": "friend"}]
     assert result[4] == {"uploaded_at": 1700000000, "likes": 42}
+
+
+@pytest.fixture
+def made_options(monkeypatch):
+    """The options of every YoutubeDL created, with no cookie env vars."""
+    made = []
+    monkeypatch.setattr(
+        "src.processor.yt_dlp.YoutubeDL",
+        lambda options: made.append(options) or MagicMock(),
+    )
+    monkeypatch.delenv("REELSEARCH_COOKIES_INSTAGRAM", raising=False)
+    monkeypatch.delenv("REELSEARCH_COOKIES_TIKTOK", raising=False)
+    return made
+
+
+def test_ydl_downloads_with_the_given_cookie_file(
+    processor, made_options, tmp_path,
+):
+    first = tmp_path / "aa11.txt"
+    second = tmp_path / "bb22.txt"
+    first.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    second.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    url = "https://www.instagram.com/reel/1/"
+
+    with_first = processor._ydl(url, cookie_file=str(first))
+    with_second = processor._ydl(url, cookie_file=str(second))
+    anonymous = processor._ydl(url)
+
+    assert made_options[0]["cookiefile"] == str(first)
+    assert made_options[1]["cookiefile"] == str(second)
+    assert "cookiefile" not in made_options[2]
+    assert len({id(with_first), id(with_second), id(anonymous)}) == 3
+    assert processor._ydl(url, cookie_file=str(first)) is with_first
+
+
+def test_ydl_reloads_a_rewritten_cookie_file(processor, made_options, tmp_path):
+    import os
+
+    path = tmp_path / "aa11.txt"
+    path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    url = "https://www.instagram.com/reel/1/"
+    before = processor._ydl(url, cookie_file=str(path))
+    stamp = os.path.getmtime(path)
+    os.utime(path, (stamp + 10, stamp + 10))
+
+    assert processor._ydl(url, cookie_file=str(path)) is not before
+
+
+def test_ydl_has_no_cookies_without_a_file_or_env_var(
+    processor, made_options, tmp_path,
+):
+    processor._ydl("https://www.tiktok.com/@u/video/1")
+    # A file removed since (the account was logged out) is not used.
+    processor._ydl(
+        "https://www.instagram.com/reel/1/",
+        cookie_file=str(tmp_path / "gone.txt"),
+    )
+
+    assert all("cookiefile" not in options for options in made_options)
+
+
+def test_ydl_falls_back_to_the_env_var_cookie_file(
+    processor, made_options, monkeypatch, tmp_path,
+):
+    path = tmp_path / "tiktok.txt"
+    path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    monkeypatch.setenv("REELSEARCH_COOKIES_TIKTOK", str(path))
+
+    processor._ydl("https://www.tiktok.com/@u/video/1")
+    processor._ydl("https://www.instagram.com/reel/1/")
+
+    assert made_options[0]["cookiefile"] == str(path)
+    assert "cookiefile" not in made_options[1]
+
+
+def test_download_passes_the_cookie_file_to_yt_dlp(
+    processor, made_options, tmp_path,
+):
+    path = tmp_path / "aa11.txt"
+    path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+
+    processor.download(
+        "https://www.instagram.com/reel/1/", cookie_file=str(path)
+    )
+
+    assert made_options[0]["cookiefile"] == str(path)

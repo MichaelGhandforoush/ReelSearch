@@ -64,18 +64,22 @@ class LoginSession:
         self.cancel_event = threading.Event()
         self.confirm_event = threading.Event()
         self.thread = None
+        # Guards status/error/notice/finished_at so a poll sees them change
+        # together. Never held across a browser call.
+        self.lock = threading.Lock()
 
     @property
     def finished(self):
         return self.status in FINISHED
 
     def snapshot(self):
-        return {
-            "status": self.status,
-            "error": self.error,
-            "notice": self.notice,
-            "username": self.username,
-        }
+        with self.lock:
+            return {
+                "status": self.status,
+                "error": self.error,
+                "notice": self.notice,
+                "username": self.username,
+            }
 
     def stub(self):
         return {"platform": self.platform_name, "id": self.id}
@@ -117,13 +121,15 @@ class LoginSessions:
                     return session
             session = LoginSession(platform_name, username)
             self._sessions[session.id] = session
-        session.thread = threading.Thread(
-            target=self._run,
-            args=(session,),
-            daemon=True,
-            name=f"{platform_name}-login-{session.id[:8]}",
-        )
-        session.thread.start()
+            # Started under the lock so shutdown() never sees the session
+            # without a running thread to join. _run does not take this lock.
+            session.thread = threading.Thread(
+                target=self._run,
+                args=(session,),
+                daemon=True,
+                name=f"{platform_name}-login-{session.id[:8]}",
+            )
+            session.thread.start()
         return session
 
     def get(self, session_id):
@@ -199,7 +205,20 @@ class LoginSessions:
             )
             return
 
-        session.status = "waiting"
+        with session.lock:
+            session.status = "waiting"
+        try:
+            self._watch(session, label)
+        except Exception as error:
+            # Anything unexpected must not leave the login "waiting" forever
+            # with its browser open.
+            print(f"{label} login for {session.username} failed: {error}")
+            self._finish(
+                session, "failed",
+                f"The {label} login stopped unexpectedly ({_short(error)}).",
+            )
+
+    def _watch(self, session, label):
         logged_in_since = None
         while True:
             if session.cancel_event.wait(POLL_SECONDS):
@@ -233,7 +252,8 @@ class LoginSessions:
 
             confirmed = session.confirm_event.is_set()
             if logged_in:
-                session.notice = None
+                with session.lock:
+                    session.notice = None
                 logged_in_since = logged_in_since or now
                 if confirmed or now - logged_in_since >= LOGGED_IN_GRACE_SECONDS:
                     self._connect(session)
@@ -242,7 +262,8 @@ class LoginSessions:
                 logged_in_since = None
                 if confirmed:
                     session.confirm_event.clear()
-                    session.notice = NOT_LOGGED_IN_NOTICE
+                    with session.lock:
+                        session.notice = NOT_LOGGED_IN_NOTICE
 
     def _connect(self, session):
         label = session.platform_name.capitalize()
@@ -261,19 +282,28 @@ class LoginSessions:
                 f"saved ({_short(error)}).",
             )
             return
-        session.error = None
-        session.notice = None
-        session.finished_at = time.monotonic()
-        session.status = "connected"
+        with session.lock:
+            session.error = None
+            session.notice = None
+            session.finished_at = time.monotonic()
+            session.status = "connected"
 
     def _finish(self, session, status, error=None):
         """End a login that did not produce an account."""
         self._quit(session)
-        account_store.remove_profile(session.stub())
-        session.error = error
-        session.notice = None
-        session.finished_at = time.monotonic()
-        session.status = status
+        if not account_store.remove_profile(session.stub()):
+            print(f"Could not delete the login profile {session.id}.")
+            error = (
+                f"{error} " if error else ""
+            ) + (
+                "The browser profile could not be deleted, so the login may "
+                "still be saved on this computer."
+            )
+        with session.lock:
+            session.error = error
+            session.notice = None
+            session.finished_at = time.monotonic()
+            session.status = status
 
     @staticmethod
     def _quit(session):

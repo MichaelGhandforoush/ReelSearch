@@ -12,6 +12,8 @@ Leftovers are:
   stopped mid-video. Recent files and videos being loaded are skipped.
 - sync_state: sync progress kept for accounts that no longer exist.
 - url_files: saved-video lists for accounts that no longer exist.
+- cookie_files: saved logins (cookies/<account id>.txt) of accounts that no
+  longer exist.
 """
 
 import json
@@ -21,7 +23,10 @@ import time
 
 from src import account_store
 
-CATEGORIES = ("profiles", "info_files", "media", "sync_state", "url_files")
+CATEGORIES = (
+    "profiles", "info_files", "media", "sync_state", "url_files",
+    "cookie_files",
+)
 # Downloads newer than this may still be in use by a video being processed.
 MEDIA_MIN_AGE_SECONDS = 60 * 60
 URLS_FILE = re.compile(r"^(instagram|tiktok)(?:_([0-9a-f]+))?_urls\.json$")
@@ -120,6 +125,22 @@ def _orphan_url_files(root, accounts):
     return found
 
 
+def _orphan_cookie_files(cookies_dir, account_ids):
+    found = []
+    if not os.path.isdir(cookies_dir):
+        return found
+    for name in sorted(os.listdir(cookies_dir)):
+        path = os.path.join(cookies_dir, name)
+        account_id, extension = os.path.splitext(name)
+        if (
+            extension == ".txt"
+            and os.path.isfile(path)
+            and account_id not in account_ids
+        ):
+            found.append((path, _size(path)))
+    return found
+
+
 def storage_report(
     accounts,
     sync_states,
@@ -157,6 +178,9 @@ def storage_report(
             if key not in account_ids
         ]),
         "url_files": _category(_orphan_url_files(root, accounts)),
+        "cookie_files": _category(_orphan_cookie_files(
+            os.path.join(root, "cookies"), account_ids
+        )),
     }
     usage = {
         "library": _size(library_dir) if os.path.isdir(library_dir) else 0,
